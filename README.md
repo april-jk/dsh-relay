@@ -4,6 +4,8 @@
 
 Cloud Relay for the DSH mobile remote-control MVP.
 
+Public production endpoint: `https://relay.dshmobile.online`
+
 ## Local
 
 ```bash
@@ -17,7 +19,7 @@ The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persis
 
 ## Railway
 
-Create a Railway service from this directory, set `JWT_SECRET` to a long random value, and attach a persistent volume mounted at `/data`. Set `DATABASE_PATH=/data/relay.sqlite`. Railway's generated public domain must be used as the Relay base URL by the mobile app and Companion. The service must be behind Railway TLS; the Companion automatically converts an `https://` Relay URL to `wss://` for its device connection.
+Create a Railway service from this directory, set `JWT_SECRET` to a long random value, and attach a persistent volume mounted at `/data`. Set `DATABASE_PATH=/data/relay.sqlite`. Add an HTTPS custom domain such as `relay.dshmobile.online` and use it as the Relay base URL in the mobile app and Companion. The Companion automatically converts an `https://` Relay URL to `wss://` for its device connection.
 
 Set `TRUST_PROXY=1` on Railway so rate limiting uses the first address supplied by Railway's trusted proxy. Leave it disabled when exposing the Node process directly.
 
