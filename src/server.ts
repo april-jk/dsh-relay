@@ -259,6 +259,23 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       sessions: store.listAccessSessions(accessSessionsRoute[1], limit),
     });
   }
+  const deviceUnbindRoute = routeMatch(
+    url.pathname,
+    /^\/device-management\/([^/]+)\/unbind$/,
+  );
+  if (deviceUnbindRoute && req.method === "POST") {
+    const deviceToken = req.headers.authorization?.startsWith("Device ")
+      ? req.headers.authorization.slice(7)
+      : undefined;
+    const device = deviceToken
+      ? store.findDeviceByToken(deviceUnbindRoute[1], deviceToken)
+      : null;
+    if (!device)
+      return json(res, 401, { error: "invalid_device_token" });
+    store.unbind(deviceUnbindRoute[1], device.account_id);
+    deviceConnections.get(deviceUnbindRoute[1])?.close(4003, "unbound");
+    return json(res, 200, { ok: true });
+  }
   const deviceRoute = routeMatch(url.pathname, /^\/devices\/([^/]+)$/);
   if (deviceRoute && req.method === "PATCH") {
     const accountId = account(req);

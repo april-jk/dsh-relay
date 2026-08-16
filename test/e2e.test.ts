@@ -46,6 +46,9 @@ function next(ws: WebSocket): Promise<any> {
     ws.once("message", (data) => resolve(JSON.parse(data.toString()))),
   );
 }
+function closed(ws: WebSocket): Promise<number> {
+  return new Promise((resolve) => ws.once("close", (code) => resolve(code)));
+}
 
 test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "dsh-relay-test-"));
@@ -254,4 +257,60 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   assert.equal(offline.status, 503);
   assert.deepEqual(await offline.json(), { reason: "device_offline" });
+
+  const reconnected = await open(`${wsBase}/device`);
+  reconnected.send(
+    JSON.stringify({
+      v: 1,
+      type: "auth",
+      id: "reconnect-auth",
+      ts: Date.now(),
+      payload: {
+        deviceId: session.data.deviceId,
+        deviceToken: confirmed.data.deviceToken,
+      },
+    }),
+  );
+  assert.equal((await next(reconnected)).type, "auth_ok");
+  const revokedConnection = closed(reconnected);
+  const unbound = await fetch(
+    `${base}/device-management/${session.data.deviceId}/unbind`,
+    {
+      method: "POST",
+      headers: { authorization: `Device ${confirmed.data.deviceToken}` },
+    },
+  );
+  assert.equal(unbound.status, 200);
+  assert.deepEqual(await unbound.json(), { ok: true });
+  assert.equal(await revokedConnection, 4003);
+
+  const devicesAfterUnbind = await request("/devices", "GET", undefined, access);
+  assert.deepEqual(devicesAfterUnbind.data.devices, []);
+  const repeatedUnbind = await fetch(
+    `${base}/device-management/${session.data.deviceId}/unbind`,
+    {
+      method: "POST",
+      headers: { authorization: `Device ${confirmed.data.deviceToken}` },
+    },
+  );
+  assert.equal(repeatedUnbind.status, 401);
+  assert.deepEqual(await repeatedUnbind.json(), {
+    error: "invalid_device_token",
+  });
+
+  const staleDevice = await open(`${wsBase}/device`);
+  const staleClosed = closed(staleDevice);
+  staleDevice.send(
+    JSON.stringify({
+      v: 1,
+      type: "auth",
+      id: "stale-auth",
+      ts: Date.now(),
+      payload: {
+        deviceId: session.data.deviceId,
+        deviceToken: confirmed.data.deviceToken,
+      },
+    }),
+  );
+  assert.equal(await staleClosed, 4003);
 });
