@@ -1,19 +1,26 @@
-import http, { IncomingMessage, ServerResponse } from 'node:http';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { WebSocket, WebSocketServer } from 'ws';
-import { Store } from './store.js';
-import { randomToken, signToken, verifyToken } from './auth.js';
+import http, { IncomingMessage, ServerResponse } from "node:http";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { WebSocket, WebSocketServer } from "ws";
+import { Store } from "./store.js";
+import { randomToken, signToken, verifyToken } from "./auth.js";
 
-type Envelope = { v: 1; type: string; channel?: string; id: string; ts: number; payload: any };
+type Envelope = {
+  v: 1;
+  type: string;
+  channel?: string;
+  id: string;
+  ts: number;
+  payload: any;
+};
 type PendingHttp = { res: ServerResponse; timer: NodeJS.Timeout };
 type PendingWs = { socket: WebSocket; timer?: NodeJS.Timeout };
 
 const port = Number(process.env.PORT ?? 8787);
-const host = process.env.HOST ?? '0.0.0.0';
-const dbPath = process.env.DATABASE_PATH ?? './data/relay.sqlite';
-const secret = process.env.JWT_SECRET ?? 'local-development-secret-change-me';
+const host = process.env.HOST ?? "0.0.0.0";
+const dbPath = process.env.DATABASE_PATH ?? "./data/relay.sqlite";
+const secret = process.env.JWT_SECRET ?? "local-development-secret-change-me";
 mkdirSync(dirname(dbPath), { recursive: true });
 const store = new Store(dbPath);
 const deviceConnections = new Map<string, WebSocket>();
@@ -21,45 +28,455 @@ const pendingHttp = new Map<string, PendingHttp>();
 const pendingWs = new Map<string, PendingWs>();
 const consumedTickets = new Set<string>();
 
-function json(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) { const data = JSON.stringify(body); res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), ...headers }); res.end(data); }
-async function body(req: IncomingMessage): Promise<any> { const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); if (!chunks.length) return {}; try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return null; } }
-function bearer(req: IncomingMessage) { const value = req.headers.authorization; return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
-function account(req: IncomingMessage) { const token = verifyToken(bearer(req), secret); return token?.kind === 'access' ? String(token.sub) : null; }
-function cookies(req: IncomingMessage) { return Object.fromEntries((req.headers.cookie ?? '').split(';').filter(Boolean).map((part) => { const i = part.indexOf('='); return [part.slice(0, i).trim(), decodeURIComponent(part.slice(i + 1))]; })); }
-function upstreamCookie(value: string | undefined) { const kept = (value ?? '').split(';').map((part) => part.trim()).filter((part) => part && !part.startsWith('dsh_session=')); return kept.length ? kept.join('; ') : undefined; }
-function send(deviceId: string, message: Envelope): boolean { const ws = deviceConnections.get(deviceId); if (!ws || ws.readyState !== WebSocket.OPEN) return false; ws.send(JSON.stringify(message)); return true; }
-function envelope(type: string, payload: any, channel?: string): Envelope { return { v: 1, type, channel, id: randomUUID(), ts: Date.now(), payload }; }
-function issueTokens(accountId: string) { const accessToken = signToken({ kind: 'access', sub: accountId }, secret, 7 * 86400_000); const refreshToken = randomToken(); store.saveRefresh(accountId, refreshToken, Date.now() + 30 * 86400_000); return { accessToken, refreshToken }; }
-function routeMatch(path: string, pattern: RegExp) { return pattern.exec(path); }
-
-async function api(req: IncomingMessage, res: ServerResponse) {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-  const input = await body(req);
-  if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true });
-  if (req.method === 'POST' && url.pathname === '/auth/register') { if (!input?.email || typeof input.password !== 'string' || input.password.length < 8) return json(res, 400, { error: 'invalid_credentials' }); try { const acc = store.createAccount(input.email, input.password); return json(res, 201, issueTokens(acc.id)); } catch { return json(res, 409, { error: 'email_exists' }); } }
-  if (req.method === 'POST' && url.pathname === '/auth/login') { const acc = store.verifyPassword(input?.email ?? '', input?.password ?? ''); return acc ? json(res, 200, issueTokens(acc.id)) : json(res, 401, { error: 'invalid_credentials' }); }
-  if (req.method === 'POST' && url.pathname === '/auth/refresh') { const accountId = store.consumeRefresh(input?.refreshToken ?? ''); return accountId ? json(res, 200, issueTokens(accountId)) : json(res, 401, { error: 'invalid_refresh_token' }); }
-  if (req.method === 'POST' && url.pathname === '/pair/session') return json(res, 201, store.createPair());
-  if (req.method === 'POST' && url.pathname === '/pair/claim') { const accountId = account(req); if (!accountId) return json(res, 401, { error: 'unauthorized' }); const claimed = store.claimPair(String(input?.code ?? ''), accountId); return claimed ? json(res, 200, claimed) : json(res, 409, { error: 'invalid_or_expired_code' }); }
-  if (req.method === 'POST' && url.pathname === '/pair/confirm') { const result = store.confirmPair(input?.deviceId ?? '', input?.deviceSecret ?? '', input?.deviceName ?? 'DSH Computer'); if (result === 'pending') return json(res, 202, { status: 'pending' }); return result ? json(res, 200, { deviceToken: result }) : json(res, 401, { error: 'invalid_pair_session' }); }
-  if (req.method === 'GET' && url.pathname === '/devices') { const accountId = account(req); return accountId ? json(res, 200, { devices: store.listDevices(accountId, (id) => deviceConnections.has(id)) }) : json(res, 401, { error: 'unauthorized' }); }
-  if (req.method === 'POST' && url.pathname === '/web-ticket') { const accountId = account(req); const device = store.device(input?.deviceId ?? ''); if (!accountId || !device || device.account_id !== accountId) return json(res, 403, { error: 'forbidden' }); const ticket = signToken({ kind: 'web-ticket', sub: accountId, deviceId: device.id, nonce: randomUUID() }, secret, Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60) * 1000); return json(res, 200, { ticket, expiresIn: Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60) }); }
-  const deviceRoute = routeMatch(url.pathname, /^\/devices\/([^/]+)$/);
-  if (deviceRoute && req.method === 'PATCH') { const accountId = account(req); if (!accountId || typeof input?.name !== 'string' || !input.name.trim()) return json(res, 400, { error: 'invalid_request' }); store.rename(deviceRoute[1], accountId, input.name.trim()); return json(res, 200, { ok: true }); }
-  if (deviceRoute && req.method === 'DELETE') { const accountId = account(req); if (!accountId || !store.unbind(deviceRoute[1], accountId)) return json(res, 404, { error: 'not_found' }); deviceConnections.get(deviceRoute[1])?.close(4003, 'unbound'); return json(res, 200, { ok: true }); }
-  return json(res, 404, { error: 'not_found' });
+function json(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+) {
+  const data = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(data),
+    ...headers,
+  });
+  res.end(data);
+}
+async function body(req: IncomingMessage): Promise<any> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  if (!chunks.length) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+function bearer(req: IncomingMessage) {
+  const value = req.headers.authorization;
+  return value?.startsWith("Bearer ") ? value.slice(7) : undefined;
+}
+function account(req: IncomingMessage) {
+  const token = verifyToken(bearer(req), secret);
+  return token?.kind === "access" ? String(token.sub) : null;
+}
+function webSessionDevice(req: IncomingMessage): string | null {
+  const session = verifyToken(cookies(req).dsh_session, secret);
+  return session?.kind === "web-session" && typeof session.deviceId === "string"
+    ? session.deviceId
+    : null;
+}
+function isRelayApi(pathname: string) {
+  return (
+    pathname === "/health" ||
+    pathname === "/devices" ||
+    pathname === "/web-ticket" ||
+    pathname.startsWith("/auth/") ||
+    pathname.startsWith("/pair/") ||
+    pathname.startsWith("/devices/")
+  );
+}
+function cookies(req: IncomingMessage) {
+  return Object.fromEntries(
+    (req.headers.cookie ?? "")
+      .split(";")
+      .filter(Boolean)
+      .map((part) => {
+        const i = part.indexOf("=");
+        return [part.slice(0, i).trim(), decodeURIComponent(part.slice(i + 1))];
+      }),
+  );
+}
+function upstreamCookie(value: string | undefined) {
+  const kept = (value ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part && !part.startsWith("dsh_session="));
+  return kept.length ? kept.join("; ") : undefined;
+}
+function send(deviceId: string, message: Envelope): boolean {
+  const ws = deviceConnections.get(deviceId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(message));
+  return true;
+}
+function envelope(type: string, payload: any, channel?: string): Envelope {
+  return { v: 1, type, channel, id: randomUUID(), ts: Date.now(), payload };
+}
+function issueTokens(accountId: string) {
+  const accessToken = signToken(
+    { kind: "access", sub: accountId },
+    secret,
+    7 * 86400_000,
+  );
+  const refreshToken = randomToken();
+  store.saveRefresh(accountId, refreshToken, Date.now() + 30 * 86400_000);
+  return { accessToken, refreshToken };
+}
+function routeMatch(path: string, pattern: RegExp) {
+  return pattern.exec(path);
 }
 
-function authorizeWeb(req: IncomingMessage, deviceId: string, url: URL): { ok: boolean; setCookie?: string } { const session = verifyToken(cookies(req).dsh_session, secret); if (session?.kind === 'web-session' && session.deviceId === deviceId) return { ok: true }; const rawTicket = url.searchParams.get('ticket') ?? undefined; const ticket = verifyToken(rawTicket, secret); if (ticket?.kind !== 'web-ticket' || ticket.deviceId !== deviceId || !ticket.nonce || consumedTickets.has(ticket.nonce)) return { ok: false }; consumedTickets.add(ticket.nonce); setTimeout(() => consumedTickets.delete(ticket.nonce), 65_000).unref(); const sessionToken = signToken({ kind: 'web-session', sub: ticket.sub, deviceId }, secret, 2 * 3600_000); url.searchParams.delete('ticket'); return { ok: true, setCookie: `dsh_session=${sessionToken}; HttpOnly; SameSite=Lax; Path=/s/${deviceId}; Max-Age=7200` }; }
+async function api(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(
+    req.url ?? "/",
+    `http://${req.headers.host ?? "localhost"}`,
+  );
+  const input = await body(req);
+  if (req.method === "GET" && url.pathname === "/health")
+    return json(res, 200, { ok: true });
+  if (req.method === "POST" && url.pathname === "/auth/register") {
+    if (
+      !input?.email ||
+      typeof input.password !== "string" ||
+      input.password.length < 8
+    )
+      return json(res, 400, { error: "invalid_credentials" });
+    try {
+      const acc = store.createAccount(input.email, input.password);
+      return json(res, 201, issueTokens(acc.id));
+    } catch {
+      return json(res, 409, { error: "email_exists" });
+    }
+  }
+  if (req.method === "POST" && url.pathname === "/auth/login") {
+    const acc = store.verifyPassword(input?.email ?? "", input?.password ?? "");
+    return acc
+      ? json(res, 200, issueTokens(acc.id))
+      : json(res, 401, { error: "invalid_credentials" });
+  }
+  if (req.method === "POST" && url.pathname === "/auth/refresh") {
+    const accountId = store.consumeRefresh(input?.refreshToken ?? "");
+    return accountId
+      ? json(res, 200, issueTokens(accountId))
+      : json(res, 401, { error: "invalid_refresh_token" });
+  }
+  if (req.method === "POST" && url.pathname === "/pair/session")
+    return json(res, 201, store.createPair());
+  if (req.method === "POST" && url.pathname === "/pair/claim") {
+    const accountId = account(req);
+    if (!accountId) return json(res, 401, { error: "unauthorized" });
+    const claimed = store.claimPair(String(input?.code ?? ""), accountId);
+    return claimed
+      ? json(res, 200, claimed)
+      : json(res, 409, { error: "invalid_or_expired_code" });
+  }
+  if (req.method === "POST" && url.pathname === "/pair/confirm") {
+    const result = store.confirmPair(
+      input?.deviceId ?? "",
+      input?.deviceSecret ?? "",
+      input?.deviceName ?? "DSH Computer",
+    );
+    if (result === "pending") return json(res, 202, { status: "pending" });
+    return result
+      ? json(res, 200, { deviceToken: result })
+      : json(res, 401, { error: "invalid_pair_session" });
+  }
+  if (req.method === "GET" && url.pathname === "/devices") {
+    const accountId = account(req);
+    return accountId
+      ? json(res, 200, {
+          devices: store.listDevices(accountId, (id) =>
+            deviceConnections.has(id),
+          ),
+        })
+      : json(res, 401, { error: "unauthorized" });
+  }
+  if (req.method === "POST" && url.pathname === "/web-ticket") {
+    const accountId = account(req);
+    const device = store.device(input?.deviceId ?? "");
+    if (!accountId || !device || device.account_id !== accountId)
+      return json(res, 403, { error: "forbidden" });
+    const ticket = signToken(
+      {
+        kind: "web-ticket",
+        sub: accountId,
+        deviceId: device.id,
+        nonce: randomUUID(),
+      },
+      secret,
+      Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60) * 1000,
+    );
+    return json(res, 200, {
+      ticket,
+      expiresIn: Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60),
+    });
+  }
+  const deviceRoute = routeMatch(url.pathname, /^\/devices\/([^/]+)$/);
+  if (deviceRoute && req.method === "PATCH") {
+    const accountId = account(req);
+    if (!accountId || typeof input?.name !== "string" || !input.name.trim())
+      return json(res, 400, { error: "invalid_request" });
+    store.rename(deviceRoute[1], accountId, input.name.trim());
+    return json(res, 200, { ok: true });
+  }
+  if (deviceRoute && req.method === "DELETE") {
+    const accountId = account(req);
+    if (!accountId || !store.unbind(deviceRoute[1], accountId))
+      return json(res, 404, { error: "not_found" });
+    deviceConnections.get(deviceRoute[1])?.close(4003, "unbound");
+    return json(res, 200, { ok: true });
+  }
+  return json(res, 404, { error: "not_found" });
+}
 
-async function proxyHttp(req: IncomingMessage, res: ServerResponse, deviceId: string, path: string, setCookie?: string) { const device = store.device(deviceId); if (!deviceConnections.has(deviceId)) return json(res, 503, { reason: 'device_offline' }); if (device?.dsh_status !== 'online') return json(res, 503, { reason: 'dsh_offline' }); const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const channel = `ch_${randomUUID()}`; const timer = setTimeout(() => { pendingHttp.delete(channel); if (!res.headersSent) json(res, 504, { reason: 'tunnel_timeout' }); }, 30_000); pendingHttp.set(channel, { res, timer }); const headers = { ...req.headers, cookie: upstreamCookie(req.headers.cookie) }; delete headers.host; if (!headers.cookie) delete headers.cookie; if (!send(deviceId, envelope('http_req', { method: req.method, path, headers, bodyB64: Buffer.concat(chunks).toString('base64') }, channel))) { clearTimeout(timer); pendingHttp.delete(channel); json(res, 503, { reason: 'device_offline' }); } else if (setCookie) res.setHeader('set-cookie', setCookie); }
+function authorizeWeb(
+  req: IncomingMessage,
+  deviceId: string,
+  url: URL,
+): { ok: boolean; setCookie?: string } {
+  const session = verifyToken(cookies(req).dsh_session, secret);
+  if (session?.kind === "web-session" && session.deviceId === deviceId)
+    return { ok: true };
+  const rawTicket = url.searchParams.get("ticket") ?? undefined;
+  const ticket = verifyToken(rawTicket, secret);
+  if (
+    ticket?.kind !== "web-ticket" ||
+    ticket.deviceId !== deviceId ||
+    !ticket.nonce ||
+    consumedTickets.has(ticket.nonce)
+  )
+    return { ok: false };
+  consumedTickets.add(ticket.nonce);
+  setTimeout(() => consumedTickets.delete(ticket.nonce), 65_000).unref();
+  const sessionToken = signToken(
+    { kind: "web-session", sub: ticket.sub, deviceId },
+    secret,
+    2 * 3600_000,
+  );
+  url.searchParams.delete("ticket");
+  const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  return {
+    ok: true,
+    setCookie: `dsh_session=${sessionToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=7200${secure}`,
+  };
+}
 
-const server = http.createServer(async (req, res) => { try { const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`); const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname); if (match) { const auth = authorizeWeb(req, match[1], url); if (!auth.ok) return json(res, 401, { error: 'invalid_web_session' }); return proxyHttp(req, res, match[1], `${match[2] ?? '/'}${url.search}`, auth.setCookie); } return await api(req, res); } catch (error) { console.error('request failed', error instanceof Error ? error.message : 'unknown'); if (!res.headersSent) json(res, 500, { error: 'internal_error' }); } });
+async function proxyHttp(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deviceId: string,
+  path: string,
+  setCookie?: string,
+) {
+  const device = store.device(deviceId);
+  if (!deviceConnections.has(deviceId))
+    return json(res, 503, { reason: "device_offline" });
+  if (device?.dsh_status !== "online")
+    return json(res, 503, { reason: "dsh_offline" });
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  const channel = `ch_${randomUUID()}`;
+  const timer = setTimeout(() => {
+    pendingHttp.delete(channel);
+    if (!res.headersSent) json(res, 504, { reason: "tunnel_timeout" });
+  }, 30_000);
+  pendingHttp.set(channel, { res, timer });
+  const headers = {
+    ...req.headers,
+    cookie: upstreamCookie(req.headers.cookie),
+  };
+  delete headers.host;
+  if (!headers.cookie) delete headers.cookie;
+  if (
+    !send(
+      deviceId,
+      envelope(
+        "http_req",
+        {
+          method: req.method,
+          path,
+          headers,
+          bodyB64: Buffer.concat(chunks).toString("base64"),
+        },
+        channel,
+      ),
+    )
+  ) {
+    clearTimeout(timer);
+    pendingHttp.delete(channel);
+    json(res, 503, { reason: "device_offline" });
+  } else if (setCookie) res.setHeader("set-cookie", setCookie);
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(
+      req.url ?? "/",
+      `http://${req.headers.host ?? "localhost"}`,
+    );
+    const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
+    if (match) {
+      const auth = authorizeWeb(req, match[1], url);
+      if (!auth.ok) return json(res, 401, { error: "invalid_web_session" });
+      return proxyHttp(
+        req,
+        res,
+        match[1],
+        `${match[2] ?? "/"}${url.search}`,
+        auth.setCookie,
+      );
+    }
+    if (!isRelayApi(url.pathname)) {
+      const deviceId = webSessionDevice(req);
+      if (!deviceId) return json(res, 401, { error: "invalid_web_session" });
+      return proxyHttp(req, res, deviceId, `${url.pathname}${url.search}`);
+    }
+    return await api(req, res);
+  } catch (error) {
+    console.error(
+      "request failed",
+      error instanceof Error ? error.message : "unknown",
+    );
+    if (!res.headersSent) json(res, 500, { error: "internal_error" });
+  }
+});
 
 const wss = new WebSocketServer({ noServer: true });
-server.on('upgrade', (req, socket, head) => { const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`); if (url.pathname === '/device') return wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req)); const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname); if (!match || !authorizeWeb(req, match[1], url).ok || !deviceConnections.has(match[1])) return socket.destroy(); wss.handleUpgrade(req, socket, head, (ws) => { const channel = `ch_${randomUUID()}`; pendingWs.set(channel, { socket: ws, timer: setTimeout(() => ws.close(1013, 'tunnel timeout'), 10_000) }); const headers = { ...req.headers, cookie: upstreamCookie(req.headers.cookie) }; if (!headers.cookie) delete headers.cookie; send(match[1], envelope('ws_open', { path: `${match[2] ?? '/'}${url.search}`, headers }, channel)); ws.on('message', (data, binary) => send(match[1], envelope('ws_frame', { dataB64: Buffer.from(data as any).toString('base64'), opcode: binary ? 2 : 1 }, channel))); ws.on('close', (code, reason) => { pendingWs.delete(channel); send(match[1], envelope('ws_close', { code, reason: reason.toString() }, channel)); }); }); });
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(
+    req.url ?? "/",
+    `http://${req.headers.host ?? "localhost"}`,
+  );
+  if (url.pathname === "/device")
+    return wss.handleUpgrade(req, socket, head, (ws) =>
+      wss.emit("connection", ws, req),
+    );
+  const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
+  const deviceId = match ? match[1] : webSessionDevice(req);
+  if (match && !authorizeWeb(req, deviceId!, url).ok) return socket.destroy();
+  if (!deviceId || !deviceConnections.has(deviceId)) return socket.destroy();
+  const upstreamPath = match
+    ? `${match[2] ?? "/"}${url.search}`
+    : `${url.pathname}${url.search}`;
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    const channel = `ch_${randomUUID()}`;
+    pendingWs.set(channel, {
+      socket: ws,
+      timer: setTimeout(() => ws.close(1013, "tunnel timeout"), 10_000),
+    });
+    const headers = {
+      ...req.headers,
+      cookie: upstreamCookie(req.headers.cookie),
+    };
+    if (!headers.cookie) delete headers.cookie;
+    send(
+      deviceId,
+      envelope("ws_open", { path: upstreamPath, headers }, channel),
+    );
+    ws.on("message", (data, binary) =>
+      send(
+        deviceId,
+        envelope(
+          "ws_frame",
+          {
+            dataB64: Buffer.from(data as any).toString("base64"),
+            opcode: binary ? 2 : 1,
+          },
+          channel,
+        ),
+      ),
+    );
+    ws.on("close", (code, reason) => {
+      pendingWs.delete(channel);
+      send(
+        deviceId,
+        envelope("ws_close", { code, reason: reason.toString() }, channel),
+      );
+    });
+  });
+});
 
-wss.on('connection', (ws, req) => { if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/device') return; let deviceId: string | null = null; const authTimer = setTimeout(() => ws.close(4001, 'auth timeout'), 5_000); ws.on('message', (raw) => { let msg: Envelope; try { msg = JSON.parse(raw.toString()); } catch { return ws.close(4000, 'invalid json'); } if (!deviceId) { if (msg.type !== 'auth' || !store.findDeviceByToken(msg.payload?.deviceId, msg.payload?.deviceToken)) return ws.close(4003, 'auth failed'); const authenticatedId = String(msg.payload.deviceId); deviceId = authenticatedId; clearTimeout(authTimer); deviceConnections.get(authenticatedId)?.close(4002, 'replaced'); deviceConnections.set(authenticatedId, ws); store.updateStatus(authenticatedId, 'online', 'offline'); return ws.send(JSON.stringify(envelope('auth_ok', {}))); } if (msg.type === 'ping') return ws.send(JSON.stringify(envelope('pong', {}))); if (msg.type === 'status') return store.updateStatus(deviceId as string, 'online', msg.payload?.dsh === 'online' ? 'online' : 'offline'); if (msg.type === 'event') return store.addEvent(deviceId as string, msg.payload?.kind ?? 'unknown', msg.payload); if (msg.type === 'http_res' && msg.channel) { const pending = pendingHttp.get(msg.channel); if (!pending) return; clearTimeout(pending.timer); pendingHttp.delete(msg.channel); const headers = { ...(msg.payload?.headers ?? {}) }; delete headers['content-length']; delete headers['transfer-encoding']; pending.res.writeHead(msg.payload?.status ?? 502, headers); pending.res.end(Buffer.from(msg.payload?.bodyB64 ?? '', 'base64')); } if (msg.type === 'ws_open_ok' && msg.channel) { const pending = pendingWs.get(msg.channel); if (pending?.timer) { clearTimeout(pending.timer); delete pending.timer; } } if (msg.type === 'ws_frame' && msg.channel) { const pending = pendingWs.get(msg.channel); if (pending?.socket.readyState === WebSocket.OPEN) pending.socket.send(Buffer.from(msg.payload?.dataB64 ?? '', 'base64'), { binary: msg.payload?.opcode === 2 }); } if (msg.type === 'ws_close' && msg.channel) { pendingWs.get(msg.channel)?.socket.close(msg.payload?.code ?? 1000, msg.payload?.reason ?? ''); pendingWs.delete(msg.channel); } }); ws.on('close', () => { clearTimeout(authTimer); if (deviceId && deviceConnections.get(deviceId) === ws) { deviceConnections.delete(deviceId); store.updateStatus(deviceId, 'offline', 'offline'); } }); });
+wss.on("connection", (ws, req) => {
+  if (new URL(req.url ?? "/", "http://localhost").pathname !== "/device")
+    return;
+  let deviceId: string | null = null;
+  const authTimer = setTimeout(() => ws.close(4001, "auth timeout"), 5_000);
+  ws.on("message", (raw) => {
+    let msg: Envelope;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return ws.close(4000, "invalid json");
+    }
+    if (!deviceId) {
+      if (
+        msg.type !== "auth" ||
+        !store.findDeviceByToken(
+          msg.payload?.deviceId,
+          msg.payload?.deviceToken,
+        )
+      )
+        return ws.close(4003, "auth failed");
+      const authenticatedId = String(msg.payload.deviceId);
+      deviceId = authenticatedId;
+      clearTimeout(authTimer);
+      deviceConnections.get(authenticatedId)?.close(4002, "replaced");
+      deviceConnections.set(authenticatedId, ws);
+      store.updateStatus(authenticatedId, "online", "offline");
+      return ws.send(JSON.stringify(envelope("auth_ok", {})));
+    }
+    if (msg.type === "ping")
+      return ws.send(JSON.stringify(envelope("pong", {})));
+    if (msg.type === "status")
+      return store.updateStatus(
+        deviceId as string,
+        "online",
+        msg.payload?.dsh === "online" ? "online" : "offline",
+      );
+    if (msg.type === "event")
+      return store.addEvent(
+        deviceId as string,
+        msg.payload?.kind ?? "unknown",
+        msg.payload,
+      );
+    if (msg.type === "http_res" && msg.channel) {
+      const pending = pendingHttp.get(msg.channel);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingHttp.delete(msg.channel);
+      const headers = { ...(msg.payload?.headers ?? {}) };
+      delete headers["content-length"];
+      delete headers["transfer-encoding"];
+      pending.res.writeHead(msg.payload?.status ?? 502, headers);
+      pending.res.end(Buffer.from(msg.payload?.bodyB64 ?? "", "base64"));
+    }
+    if (msg.type === "ws_open_ok" && msg.channel) {
+      const pending = pendingWs.get(msg.channel);
+      if (pending?.timer) {
+        clearTimeout(pending.timer);
+        delete pending.timer;
+      }
+    }
+    if (msg.type === "ws_frame" && msg.channel) {
+      const pending = pendingWs.get(msg.channel);
+      if (pending?.socket.readyState === WebSocket.OPEN)
+        pending.socket.send(Buffer.from(msg.payload?.dataB64 ?? "", "base64"), {
+          binary: msg.payload?.opcode === 2,
+        });
+    }
+    if (msg.type === "ws_close" && msg.channel) {
+      pendingWs
+        .get(msg.channel)
+        ?.socket.close(msg.payload?.code ?? 1000, msg.payload?.reason ?? "");
+      pendingWs.delete(msg.channel);
+    }
+  });
+  ws.on("close", () => {
+    clearTimeout(authTimer);
+    if (deviceId && deviceConnections.get(deviceId) === ws) {
+      deviceConnections.delete(deviceId);
+      store.updateStatus(deviceId, "offline", "offline");
+    }
+  });
+});
 
-server.listen(port, host, () => console.log(`DSH Relay listening on http://${host}:${port}`));
-process.on('SIGTERM', () => server.close(() => { store.close(); process.exit(0); }));
+server.listen(port, host, () =>
+  console.log(`DSH Relay listening on http://${host}:${port}`),
+);
+process.on("SIGTERM", () =>
+  server.close(() => {
+    store.close();
+    process.exit(0);
+  }),
+);
