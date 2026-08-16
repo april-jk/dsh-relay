@@ -14,7 +14,12 @@ type Envelope = {
   ts: number;
   payload: any;
 };
-type PendingHttp = { res: ServerResponse; timer: NodeJS.Timeout };
+type PendingHttp = {
+  res: ServerResponse;
+  timer: NodeJS.Timeout;
+  deviceId: string;
+  started: boolean;
+};
 type PendingWs = { socket: WebSocket; timer?: NodeJS.Timeout };
 
 const port = Number(process.env.PORT ?? 8787);
@@ -27,6 +32,14 @@ const deviceConnections = new Map<string, WebSocket>();
 const pendingHttp = new Map<string, PendingHttp>();
 const pendingWs = new Map<string, PendingWs>();
 const consumedTickets = new Set<string>();
+
+function httpTimeout(channel: string, res: ServerResponse) {
+  return setTimeout(() => {
+    pendingHttp.delete(channel);
+    if (!res.headersSent) json(res, 504, { reason: "tunnel_timeout" });
+    else res.destroy(new Error("tunnel timeout"));
+  }, 60_000);
+}
 
 function json(
   res: ServerResponse,
@@ -267,11 +280,15 @@ async function proxyHttp(
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk));
   const channel = `ch_${randomUUID()}`;
-  const timer = setTimeout(() => {
+  const timer = httpTimeout(channel, res);
+  pendingHttp.set(channel, { res, timer, deviceId, started: false });
+  res.on("close", () => {
+    const pending = pendingHttp.get(channel);
+    if (!pending) return;
+    clearTimeout(pending.timer);
     pendingHttp.delete(channel);
-    if (!res.headersSent) json(res, 504, { reason: "tunnel_timeout" });
-  }, 30_000);
-  pendingHttp.set(channel, { res, timer });
+    send(deviceId, envelope("http_close", {}, channel));
+  });
   const headers = {
     ...req.headers,
     cookie: upstreamCookie(req.headers.cookie),
@@ -434,12 +451,25 @@ wss.on("connection", (ws, req) => {
       const pending = pendingHttp.get(msg.channel);
       if (!pending) return;
       clearTimeout(pending.timer);
-      pendingHttp.delete(msg.channel);
-      const headers = { ...(msg.payload?.headers ?? {}) };
-      delete headers["content-length"];
-      delete headers["transfer-encoding"];
-      pending.res.writeHead(msg.payload?.status ?? 502, headers);
-      pending.res.end(Buffer.from(msg.payload?.bodyB64 ?? "", "base64"));
+      if (!pending.started) {
+        const headers = { ...(msg.payload?.headers ?? {}) };
+        delete headers["content-length"];
+        delete headers["transfer-encoding"];
+        const relayCookie = pending.res.getHeader("set-cookie");
+        if (relayCookie && headers["set-cookie"])
+          headers["set-cookie"] = [relayCookie, headers["set-cookie"]].flat();
+        pending.res.writeHead(msg.payload?.status ?? 502, headers);
+        pending.started = true;
+      }
+      const chunk = Buffer.from(msg.payload?.bodyB64 ?? "", "base64");
+      if (chunk.length) pending.res.write(chunk);
+      const final = msg.payload?.final !== false;
+      if (final) {
+        pendingHttp.delete(msg.channel);
+        pending.res.end();
+      } else {
+        pending.timer = httpTimeout(msg.channel, pending.res);
+      }
     }
     if (msg.type === "ws_open_ok" && msg.channel) {
       const pending = pendingWs.get(msg.channel);

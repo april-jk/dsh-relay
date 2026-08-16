@@ -109,7 +109,48 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   device.on("message", (raw) => {
     const msg = JSON.parse(raw.toString());
-    if (msg.type === "http_req")
+    if (msg.type === "http_req" && msg.payload.path === "/api/stream") {
+      device.send(
+        JSON.stringify({
+          v: 1,
+          type: "http_res",
+          channel: msg.channel,
+          id: "stream-head",
+          ts: Date.now(),
+          payload: {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+            bodyB64: "",
+            seq: 0,
+            final: false,
+          },
+        }),
+      );
+      device.send(
+        JSON.stringify({
+          v: 1,
+          type: "http_res",
+          channel: msg.channel,
+          id: "stream-body",
+          ts: Date.now(),
+          payload: {
+            bodyB64: Buffer.from("data: ready\n\n").toString("base64"),
+            seq: 1,
+            final: false,
+          },
+        }),
+      );
+      device.send(
+        JSON.stringify({
+          v: 1,
+          type: "http_res",
+          channel: msg.channel,
+          id: "stream-end",
+          ts: Date.now(),
+          payload: { bodyB64: "", seq: 2, final: true },
+        }),
+      );
+    } else if (msg.type === "http_req")
       device.send(
         JSON.stringify({
           v: 1,
@@ -160,6 +201,12 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   });
   assert.equal(absoluteAsset.status, 200);
   assert.equal(await absoluteAsset.text(), "proxied:/assets/index.js");
+  const stream = await fetch(`${base}/api/stream`, {
+    headers: { cookie: cookie ?? "" },
+  });
+  assert.equal(stream.status, 200);
+  assert.equal(stream.headers.get("content-type"), "text/event-stream");
+  assert.equal(await stream.text(), "data: ready\n\n");
   const reused = await fetch(
     `${base}/s/${session.data.deviceId}/?ticket=${encodeURIComponent(ticketResult.data.ticket)}`,
   );
