@@ -1,5 +1,7 @@
 # dsh-relay
 
+> **Community project:** this is an unofficial project, independently developed and maintained by the community. It is not reviewed, endorsed, or supported by DeepSeek.
+
 Cloud Relay for the DSH mobile remote-control MVP.
 
 ## Local
@@ -59,3 +61,7 @@ APP_IOS_RELEASE_NOTES=Improved remote session stability.
 ```
 
 Raise `LATEST_VERSION` for a dismissible prompt. Raise `MINIMUM_VERSION` only when older builds must be blocked. Always configure a valid platform download URL before raising either version.
+
+## License
+
+[MIT](LICENSE)
