@@ -14,5 +14,4 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 RUN mkdir -p /data && chown node:node /data
 EXPOSE 8787
-USER node
-CMD ["npm", "start"]
+CMD ["sh", "-c", "chown -R node:node /data && exec setpriv --reuid=node --regid=node --init-groups npm start"]
