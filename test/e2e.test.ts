@@ -60,11 +60,28 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
       HOST: "127.0.0.1",
       DATABASE_PATH: join(dir, "relay.sqlite"),
       JWT_SECRET: "test-secret",
+      APP_ANDROID_LATEST_VERSION: "0.2.0",
+      APP_ANDROID_MINIMUM_VERSION: "0.1.0",
+      APP_ANDROID_DOWNLOAD_URL: "https://example.com/android",
+      APP_ANDROID_RELEASE_NOTES: "Test release",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForRelay();
+
+  const version = await request("/app/version?platform=android");
+  assert.equal(version.response.status, 200);
+  assert.deepEqual(version.data, {
+    platform: "android",
+    latestVersion: "0.2.0",
+    minimumVersion: "0.1.0",
+    downloadUrl: "https://example.com/android",
+    releaseNotes: "Test release",
+  });
+  const invalidPlatform = await request("/app/version?platform=windows");
+  assert.equal(invalidPlatform.response.status, 400);
+  assert.deepEqual(invalidPlatform.data, { error: "unsupported_platform" });
 
   const registered = await request("/auth/register", "POST", {
     email: "test@example.com",

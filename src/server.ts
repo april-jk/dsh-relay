@@ -91,6 +91,7 @@ function webSession(req: IncomingMessage): {
 function isRelayApi(pathname: string) {
   return (
     pathname === "/health" ||
+    pathname === "/app/version" ||
     pathname === "/devices" ||
     pathname === "/web-ticket" ||
     pathname.startsWith("/auth/") ||
@@ -152,6 +153,9 @@ function issueTokens(accountId: string) {
 function routeMatch(path: string, pattern: RegExp) {
   return pattern.exec(path);
 }
+function configured(name: string): string | null {
+  return process.env[name]?.trim() || null;
+}
 
 async function api(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(
@@ -161,6 +165,25 @@ async function api(req: IncomingMessage, res: ServerResponse) {
   const input = await body(req);
   if (req.method === "GET" && url.pathname === "/health")
     return json(res, 200, { ok: true });
+  if (req.method === "GET" && url.pathname === "/app/version") {
+    const platform = url.searchParams.get("platform");
+    if (platform !== "android" && platform !== "ios")
+      return json(res, 400, { error: "unsupported_platform" });
+    const prefix = platform === "android" ? "ANDROID" : "IOS";
+    return json(
+      res,
+      200,
+      {
+        platform,
+        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.0",
+        minimumVersion:
+          configured(`APP_${prefix}_MINIMUM_VERSION`) ?? "0.1.0",
+        downloadUrl: configured(`APP_${prefix}_DOWNLOAD_URL`),
+        releaseNotes: configured(`APP_${prefix}_RELEASE_NOTES`),
+      },
+      { "cache-control": "public, max-age=300" },
+    );
+  }
   if (req.method === "POST" && url.pathname === "/auth/register") {
     if (
       !input?.email ||
