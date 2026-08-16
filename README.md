@@ -23,6 +23,21 @@ Set `TRUST_PROXY=1` on Railway so rate limiting uses the first address supplied 
 
 The MVP is intentionally single-instance. SQLite volume persistence and a single Relay replica are required until a shared store is introduced.
 
+## Private deployment with Docker
+
+```bash
+cp .env.example .env
+```
+
+Set a long random `JWT_SECRET`, then start the single-instance Relay:
+
+```bash
+docker compose up -d --build
+curl http://127.0.0.1:8787/health
+```
+
+Put an HTTPS reverse proxy in front of port `8787`. Keep `TRUST_PROXY=0` unless that proxy overwrites client forwarding headers. The `relay-data` volume contains SQLite state and must be backed up. In the mobile app, choose **Relay 服务器** and enter the public HTTPS origin; start DSH with the same origin in `DSH_RELAY`.
+
 ## Resource limits
 
 The Relay rejects oversized requests before forwarding them and uses bounded in-memory rate and concurrency tracking. Defaults are suitable for an MVP deployment and can be adjusted through environment variables:
