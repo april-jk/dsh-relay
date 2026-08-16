@@ -17,13 +17,15 @@ npm run build
 npm start
 ```
 
-The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persistent location in production. The Relay expects HTTPS/WSS in any public deployment and never logs tunnel payloads.
+The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persistent location in production. The Relay expects HTTPS/WSS in any public deployment and routes 0.1.3 sealed tunnel frames without receiving DSH plaintext.
 
 ## Railway
 
 Create a Railway service from this directory, set `JWT_SECRET` to a long random value, and attach a persistent volume mounted at `/data`. Set `DATABASE_PATH=/data/relay.sqlite`. Add an HTTPS custom domain such as `relay.dshmobile.online` and use it as the Relay base URL in the mobile app and Companion. The Companion automatically converts an `https://` Relay URL to `wss://` for its device connection.
 
 Set `TRUST_PROXY=1` on Railway so rate limiting uses the first address supplied by Railway's trusted proxy. Leave it disabled when exposing the Node process directly.
+
+Set `PUBLIC_RELAY_URL=https://relay.dshmobile.online` so ticket responses return the canonical `wss://` client tunnel. Keep `ALLOW_LEGACY_WEB_PROXY=0` in production; enabling it re-opens the deprecated plaintext `/s` proxy for local migration tests only.
 
 The MVP is intentionally single-instance. SQLite volume persistence and a single Relay replica are required until a shared store is introduced.
 
@@ -70,11 +72,11 @@ The public `GET /app/version?platform=android|ios` endpoint drives update prompt
 
 ```bash
 APP_ANDROID_LATEST_VERSION=0.2.0
-APP_ANDROID_MINIMUM_VERSION=0.1.0
+APP_ANDROID_MINIMUM_VERSION=0.1.3
 APP_ANDROID_DOWNLOAD_URL=https://play.google.com/store/apps/details?id=io.github.apriljk.dshremote
 APP_ANDROID_RELEASE_NOTES=Improved remote session stability.
 APP_IOS_LATEST_VERSION=0.2.0
-APP_IOS_MINIMUM_VERSION=0.1.0
+APP_IOS_MINIMUM_VERSION=0.1.3
 APP_IOS_DOWNLOAD_URL=https://apps.apple.com/app/id0000000000
 APP_IOS_RELEASE_NOTES=Improved remote session stability.
 ```

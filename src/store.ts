@@ -226,8 +226,8 @@ export class Store {
     accountId: string,
     info: AccessClientInfo,
     expiresAt: number,
+    id = `access_${randomUUID()}`,
   ): string {
-    const id = `access_${randomUUID()}`;
     const now = Date.now();
     this.db
       .prepare(
@@ -276,10 +276,10 @@ export class Store {
       status: endedReason ? "ended" : row.expiresAt <= now ? "expired" : "active",
     }));
   }
-  addEvent(deviceId: string, kind: string, payload: unknown) {
+  addEvent(deviceId: string, kind: string) {
     this.db
       .prepare("INSERT INTO events VALUES (?, ?, ?, ?, ?)")
-      .run(randomUUID(), deviceId, kind, JSON.stringify(payload), Date.now());
+      .run(randomUUID(), deviceId, kind, "{}", Date.now());
     this.db
       .prepare(
         "DELETE FROM events WHERE device_id = ? AND id NOT IN (SELECT id FROM events WHERE device_id = ? ORDER BY created_at DESC LIMIT 50)",

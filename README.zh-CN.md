@@ -6,7 +6,7 @@
 
 用于 DSH 手机遥控 MVP 的云端 Relay。
 
-公共生产地址：`https://relay.dshmobile.online`
+公共生产地址：`https://relay.dshmobile.online`。0.1.3 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
 
 ## 本地运行
 
@@ -17,7 +17,7 @@ npm run build
 npm start
 ```
 
-默认监听地址是 `http://127.0.0.1:8787`。生产环境必须将 `DATABASE_PATH` 设置到持久化存储。任何公网部署都应提供 HTTPS/WSS；Relay 不会记录隧道载荷。
+默认监听地址是 `http://127.0.0.1:8787`。生产环境必须将 `DATABASE_PATH` 设置到持久化存储。任何公网部署都应提供 HTTPS/WSS；Relay 不会持有或记录隧道业务明文。
 
 ## Railway
 
@@ -70,11 +70,11 @@ Relay 会在转发前拒绝过大的请求，并使用有界的内存限流和�
 
 ```bash
 APP_ANDROID_LATEST_VERSION=0.2.0
-APP_ANDROID_MINIMUM_VERSION=0.1.0
+APP_ANDROID_MINIMUM_VERSION=0.1.3
 APP_ANDROID_DOWNLOAD_URL=https://play.google.com/store/apps/details?id=io.github.apriljk.dshremote
 APP_ANDROID_RELEASE_NOTES=Improved remote session stability.
 APP_IOS_LATEST_VERSION=0.2.0
-APP_IOS_MINIMUM_VERSION=0.1.0
+APP_IOS_MINIMUM_VERSION=0.1.3
 APP_IOS_DOWNLOAD_URL=https://apps.apple.com/app/id0000000000
 APP_IOS_RELEASE_NOTES=Improved remote session stability.
 ```

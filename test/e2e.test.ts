@@ -84,6 +84,7 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
       MAX_TUNNEL_BODY_BYTES: "1024",
       MAX_TUNNEL_RESPONSE_BYTES: "1024",
       MAX_WS_PAYLOAD_BYTES: "4096",
+      ALLOW_LEGACY_WEB_PROXY: "1",
       APP_ANDROID_LATEST_VERSION: "0.2.0",
       APP_ANDROID_MINIMUM_VERSION: "0.1.0",
       APP_ANDROID_DOWNLOAD_URL: "https://example.com/android",
@@ -172,6 +173,7 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
       payload: {
         deviceId: session.data.deviceId,
         deviceToken: confirmed.data.deviceToken,
+        capabilities: ["sealed-tunnel-v1"],
       },
     }),
   );
@@ -187,7 +189,32 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   device.on("message", (raw) => {
     const msg = JSON.parse(raw.toString());
-    if (msg.type === "http_req" && msg.payload.path === "/api/stream") {
+    if (msg.type === "client_hello")
+      device.send(
+        JSON.stringify({
+          v: 1,
+          type: "server_hello",
+          id: "server-hello",
+          ts: 0,
+          payload: {
+            accessSessionId: msg.payload.accessSessionId,
+            serverRandomB64: "opaque-random",
+            serverProofB64: "opaque-proof",
+          },
+        }),
+      );
+    else if (msg.type === "sealed")
+      device.send(
+        JSON.stringify({
+          ...msg,
+          id: "sealed-response",
+          payload: {
+            ...msg.payload,
+            ciphertextB64: "cmVsYXktY2Fubm90LWRlY3J5cHQ",
+          },
+        }),
+      );
+    else if (msg.type === "http_req" && msg.payload.path === "/api/stream") {
       device.send(
         JSON.stringify({
           v: 1,
@@ -275,6 +302,59 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
       device.send(JSON.stringify({ ...msg, id: "echo", ts: Date.now() }));
   });
 
+  const secureTicket = await request(
+    "/web-ticket",
+    "POST",
+    { deviceId: session.data.deviceId },
+    access,
+  );
+  assert.equal(secureTicket.response.status, 200);
+  assert.equal(secureTicket.data.e2eeRequired, true);
+  assert.match(secureTicket.data.accessSessionId, /^access_/);
+  assert.equal(secureTicket.data.tunnelUrl, `${wsBase}/client-tunnel`);
+  const secureClient = await open(`${wsBase}/client-tunnel`, {
+    headers: { authorization: `WebTicket ${secureTicket.data.ticket}` },
+  });
+  secureClient.send(
+    JSON.stringify({
+      v: 1,
+      type: "client_hello",
+      id: "client-hello",
+      ts: 0,
+      payload: {
+        accessSessionId: secureTicket.data.accessSessionId,
+        clientRandomB64: "opaque-random",
+        clientProofB64: "opaque-proof",
+      },
+    }),
+  );
+  assert.equal((await next(secureClient)).type, "server_hello");
+  secureClient.send(
+    JSON.stringify({
+      v: 1,
+      type: "sealed",
+      id: "sealed-request",
+      ts: 0,
+      payload: {
+        accessSessionId: secureTicket.data.accessSessionId,
+        seq: "0",
+        ciphertextB64: "b3BhcXVl",
+      },
+    }),
+  );
+  const sealedResponse = await next(secureClient);
+  assert.equal(sealedResponse.type, "sealed");
+  assert.equal(
+    sealedResponse.payload.ciphertextB64,
+    "cmVsYXktY2Fubm90LWRlY3J5cHQ",
+  );
+  secureClient.close();
+  await assert.rejects(
+    open(`${wsBase}/client-tunnel`, {
+      headers: { authorization: `WebTicket ${secureTicket.data.ticket}` },
+    }),
+  );
+
   const ticketResult = await request(
     "/web-ticket",
     "POST",
@@ -303,11 +383,13 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   assert.equal(accessLogResponse.status, 200);
   const accessLog = (await accessLogResponse.json()) as any;
-  assert.equal(accessLog.sessions.length, 1);
-  assert.equal(accessLog.sessions[0].deviceLabel, "iPhone");
-  assert.equal(accessLog.sessions[0].platform, "ios");
-  assert.equal(accessLog.sessions[0].osVersion, "18.6");
-  assert.equal(accessLog.sessions[0].status, "active");
+  assert.equal(accessLog.sessions.length, 2);
+  const iphoneSession = accessLog.sessions.find(
+    (entry: any) => entry.deviceLabel === "iPhone",
+  );
+  assert.equal(iphoneSession.platform, "ios");
+  assert.equal(iphoneSession.osVersion, "18.6");
+  assert.equal(iphoneSession.status, "active");
   assert.doesNotMatch(JSON.stringify(accessLog), /raw-marker|user-agent/i);
   const absoluteAsset = await fetch(`${base}/assets/index.js`, {
     headers: { cookie: cookie ?? "" },
@@ -361,11 +443,8 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
     { deviceId: session.data.deviceId },
     access,
   );
-  const offline = await fetch(
-    `${base}/s/${session.data.deviceId}/?ticket=${encodeURIComponent(offlineTicket.data.ticket)}`,
-  );
-  assert.equal(offline.status, 503);
-  assert.deepEqual(await offline.json(), { reason: "device_offline" });
+  assert.equal(offlineTicket.response.status, 503);
+  assert.deepEqual(offlineTicket.data, { reason: "device_offline" });
 
   const reconnected = await open(`${wsBase}/device`);
   reconnected.send(

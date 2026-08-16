@@ -36,6 +36,14 @@ type PendingWs = {
   deviceId: string;
   timer?: NodeJS.Timeout;
 };
+type SecureRoute = {
+  socket: WebSocket;
+  deviceId: string;
+  accessSessionId: string;
+  handshakeTimer?: NodeJS.Timeout;
+  idleTimer: NodeJS.Timeout;
+  bytes: number;
+};
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -59,14 +67,41 @@ const pairRateLimit = envInteger("PAIR_RATE_LIMIT_PER_MINUTE", 30);
 const tunnelRateLimit = envInteger("TUNNEL_RATE_LIMIT_PER_MINUTE", 600);
 const upgradeRateLimit = envInteger("WS_UPGRADE_RATE_LIMIT_PER_MINUTE", 120);
 const eventPayloadLimit = envInteger("MAX_EVENT_PAYLOAD_BYTES", 64 * 1024);
+const secureGlobalLimit = envInteger("MAX_SECURE_TUNNELS_GLOBAL", 512);
+const secureDeviceLimit = envInteger("MAX_SECURE_TUNNELS_PER_DEVICE", 8);
+const secureSessionByteLimit = envInteger(
+  "MAX_SECURE_TUNNEL_BYTES",
+  512 * 1024 * 1024,
+);
+const secureFrameRateLimit = envInteger(
+  "SECURE_FRAME_RATE_LIMIT_PER_MINUTE",
+  2_400,
+);
+const secureIdleTimeoutMs = envInteger(
+  "SECURE_TUNNEL_IDLE_TIMEOUT_MS",
+  5 * 60_000,
+);
+const secureHandshakeTimeoutMs = envInteger(
+  "SECURE_HANDSHAKE_TIMEOUT_MS",
+  10_000,
+);
+const allowLegacyWebProxy = ["1", "true"].includes(
+  (process.env.ALLOW_LEGACY_WEB_PROXY ?? "").toLowerCase(),
+);
 const trustProxy = ["1", "true"].includes(
   (process.env.TRUST_PROXY ?? "").toLowerCase(),
 );
 mkdirSync(dirname(dbPath), { recursive: true });
 const store = new Store(dbPath);
 const deviceConnections = new Map<string, WebSocket>();
+const deviceCapabilities = new Map<string, Set<string>>();
 const pendingHttp = new Map<string, PendingHttp>();
 const pendingWs = new Map<string, PendingWs>();
+const secureRoutes = new Map<string, SecureRoute>();
+const secureUpgradeAuth = new WeakMap<
+  IncomingMessage,
+  { deviceId: string; accessSessionId: string }
+>();
 const consumedTickets = new Set<string>();
 const rateLimiter = new FixedWindowRateLimiter();
 const maintenanceTimer = setInterval(() => {
@@ -157,16 +192,77 @@ function closeDeviceTunnels(deviceId: string) {
     pendingWs.delete(channel);
     pending.socket.close(1013, "device disconnected");
   }
+  for (const [accessSessionId, route] of secureRoutes) {
+    if (route.deviceId !== deviceId) continue;
+    closeSecureRoute(accessSessionId, 1013, "device disconnected", false);
+  }
+}
+
+function resetSecureIdle(route: SecureRoute) {
+  clearTimeout(route.idleTimer);
+  route.idleTimer = setTimeout(
+    () =>
+      closeSecureRoute(
+        route.accessSessionId,
+        1001,
+        "secure tunnel idle",
+        true,
+      ),
+    secureIdleTimeoutMs,
+  );
+  route.idleTimer.unref();
+}
+
+function closeSecureRoute(
+  accessSessionId: string,
+  code: number,
+  reason: string,
+  notifyDevice: boolean,
+) {
+  const route = secureRoutes.get(accessSessionId);
+  if (!route) return;
+  secureRoutes.delete(accessSessionId);
+  if (route.handshakeTimer) clearTimeout(route.handshakeTimer);
+  clearTimeout(route.idleTimer);
+  if (notifyDevice)
+    send(
+      route.deviceId,
+      envelope("client_close", { accessSessionId, reason }),
+    );
+  if (
+    route.socket.readyState === WebSocket.OPEN ||
+    route.socket.readyState === WebSocket.CONNECTING
+  )
+    route.socket.close(code, reason.slice(0, 100));
+}
+
+function secureCountForDevice(deviceId: string) {
+  let count = 0;
+  for (const route of secureRoutes.values())
+    if (route.deviceId === deviceId) count += 1;
+  return count;
 }
 
 function rejectUpgrade(
   socket: Duplex,
-  status: 429 | 503,
-  reason: "rate_limited" | "capacity_reached",
+  status: 401 | 426 | 429 | 503,
+  reason:
+    | "invalid_web_ticket"
+    | "e2ee_required"
+    | "rate_limited"
+    | "capacity_reached"
+    | "secure_tunnel_capacity",
   retryAfter = 1,
 ) {
-  const text = status === 429 ? "Too Many Requests" : "Service Unavailable";
-  const payload = JSON.stringify({ error: reason });
+  const text =
+    status === 401
+      ? "Unauthorized"
+      : status === 426
+        ? "Upgrade Required"
+        : status === 429
+          ? "Too Many Requests"
+          : "Service Unavailable";
+  const payload = JSON.stringify({ reason });
   socket.end(
     `HTTP/1.1 ${status} ${text}\r\n` +
       "Connection: close\r\n" +
@@ -266,6 +362,57 @@ function configured(name: string): string | null {
   return process.env[name]?.trim() || null;
 }
 
+function secureTunnelUrl(req: IncomingMessage): string {
+  const configuredOrigin = configured("PUBLIC_RELAY_URL");
+  const origin = configuredOrigin
+    ? new URL(configuredOrigin)
+    : new URL(
+        `${req.headers["x-forwarded-proto"] === "https" ? "https" : "http"}://${req.headers.host ?? "localhost"}`,
+      );
+  origin.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
+  origin.pathname = "/client-tunnel";
+  origin.search = "";
+  return origin.toString();
+}
+
+function webTicketAuthorization(req: IncomingMessage) {
+  const value = req.headers.authorization;
+  return value?.startsWith("WebTicket ") ? value.slice(10) : undefined;
+}
+
+function consumeSecureWebTicket(req: IncomingMessage): {
+  deviceId: string;
+  accessSessionId: string;
+} | null {
+  const ticket = verifyToken(webTicketAuthorization(req), secret);
+  if (
+    ticket?.kind !== "web-ticket" ||
+    typeof ticket.deviceId !== "string" ||
+    typeof ticket.accessSessionId !== "string" ||
+    typeof ticket.nonce !== "string" ||
+    consumedTickets.has(ticket.nonce)
+  )
+    return null;
+  if (
+    !deviceConnections.has(ticket.deviceId) ||
+    !deviceCapabilities.get(ticket.deviceId)?.has("sealed-tunnel-v1")
+  )
+    return null;
+  consumedTickets.add(ticket.nonce);
+  setTimeout(() => consumedTickets.delete(ticket.nonce), 65_000).unref();
+  store.createAccessSession(
+    ticket.deviceId,
+    String(ticket.sub),
+    accessClientInfo(req.headers["user-agent"]),
+    Date.now() + 2 * 3600_000,
+    ticket.accessSessionId,
+  );
+  return {
+    deviceId: ticket.deviceId,
+    accessSessionId: ticket.accessSessionId,
+  };
+}
+
 async function api(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(
     req.url ?? "/",
@@ -297,9 +444,9 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       200,
       {
         platform,
-        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.0",
+        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.3",
         minimumVersion:
-          configured(`APP_${prefix}_MINIMUM_VERSION`) ?? "0.1.0",
+          configured(`APP_${prefix}_MINIMUM_VERSION`) ?? "0.1.3",
         downloadUrl: configured(`APP_${prefix}_DOWNLOAD_URL`),
         releaseNotes: configured(`APP_${prefix}_RELEASE_NOTES`),
       },
@@ -368,19 +515,32 @@ async function api(req: IncomingMessage, res: ServerResponse) {
     const device = store.device(input?.deviceId ?? "");
     if (!accountId || !device || device.account_id !== accountId)
       return json(res, 403, { error: "forbidden" });
+    if (!deviceConnections.has(device.id))
+      return json(res, 503, { reason: "device_offline" });
+    const secure = deviceCapabilities
+      .get(device.id)
+      ?.has("sealed-tunnel-v1");
+    if (!secure && !allowLegacyWebProxy)
+      return json(res, 426, { reason: "e2ee_required" });
+    const expiresIn = Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60);
+    const accessSessionId = `access_${randomUUID()}`;
     const ticket = signToken(
       {
         kind: "web-ticket",
         sub: accountId,
         deviceId: device.id,
+        accessSessionId,
         nonce: randomUUID(),
       },
       secret,
-      Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60) * 1000,
+      expiresIn * 1000,
     );
     return json(res, 200, {
       ticket,
-      expiresIn: Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60),
+      expiresIn,
+      accessSessionId,
+      tunnelUrl: secureTunnelUrl(req),
+      e2eeRequired: !allowLegacyWebProxy || secure,
     });
   }
   const accessSessionsRoute = routeMatch(
@@ -464,12 +624,16 @@ function authorizeWeb(
     return { ok: false };
   consumedTickets.add(ticket.nonce);
   setTimeout(() => consumedTickets.delete(ticket.nonce), 65_000).unref();
-  const expiresAt = Date.now() + 2 * 3600_000;
-  const accessSessionId = store.createAccessSession(
+  const accessSessionId =
+    typeof ticket.accessSessionId === "string"
+      ? ticket.accessSessionId
+      : `access_${randomUUID()}`;
+  store.createAccessSession(
     deviceId,
     String(ticket.sub),
     accessClientInfo(req.headers["user-agent"]),
-    expiresAt,
+    Date.now() + 2 * 3600_000,
+    accessSessionId,
   );
   const sessionToken = signToken(
     { kind: "web-session", sub: ticket.sub, deviceId, accessSessionId },
@@ -579,6 +743,8 @@ const server = http.createServer(
       );
       const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
       if (match) {
+        if (!allowLegacyWebProxy)
+          return json(res, 426, { reason: "e2ee_required" });
         const auth = authorizeWeb(req, match[1], url);
         if (!auth.ok) return json(res, 401, { error: "invalid_web_session" });
         return proxyHttp(
@@ -590,6 +756,8 @@ const server = http.createServer(
         );
       }
       if (!isRelayApi(url.pathname)) {
+        if (!allowLegacyWebProxy)
+          return json(res, 426, { reason: "e2ee_required" });
         const session = webSession(req);
         if (!session) return json(res, 401, { error: "invalid_web_session" });
         store.touchAccessSession(session.accessSessionId, session.deviceId);
@@ -617,6 +785,78 @@ const wss = new WebSocketServer({
   maxPayload: wsPayloadLimit,
   perMessageDeflate: false,
 });
+
+function setupSecureClient(
+  ws: WebSocket,
+  auth: { deviceId: string; accessSessionId: string },
+) {
+  const { deviceId, accessSessionId } = auth;
+  const route: SecureRoute = {
+    socket: ws,
+    deviceId,
+    accessSessionId,
+    bytes: 0,
+    idleTimer: setTimeout(
+      () => closeSecureRoute(accessSessionId, 1001, "secure tunnel idle", true),
+      secureIdleTimeoutMs,
+    ),
+  };
+  route.idleTimer.unref();
+  route.handshakeTimer = setTimeout(
+    () =>
+      closeSecureRoute(
+        accessSessionId,
+        1008,
+        "e2ee handshake timeout",
+        true,
+      ),
+    secureHandshakeTimeoutMs,
+  );
+  route.handshakeTimer.unref();
+  secureRoutes.set(accessSessionId, route);
+  store.touchAccessSession(accessSessionId, deviceId);
+
+  ws.on("error", () => {
+    // Protocol and payload errors are scoped to this secure client.
+  });
+  ws.on("message", (raw) => {
+    const current = secureRoutes.get(accessSessionId);
+    if (current !== route) return;
+    const retryAfter = rateLimiter.take(
+      `secure-frame:${accessSessionId}`,
+      secureFrameRateLimit,
+      60_000,
+    );
+    if (retryAfter)
+      return closeSecureRoute(accessSessionId, 1008, "rate limited", true);
+    route.bytes += Buffer.byteLength(raw as any);
+    if (route.bytes > secureSessionByteLimit)
+      return closeSecureRoute(accessSessionId, 1009, "secure byte limit", true);
+    let msg: Envelope;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return closeSecureRoute(accessSessionId, 1008, "invalid envelope", true);
+    }
+    if (
+      msg?.v !== 1 ||
+      !["client_hello", "sealed", "client_close"].includes(msg.type) ||
+      msg.payload?.accessSessionId !== accessSessionId ||
+      (msg.type === "sealed" && route.handshakeTimer)
+    )
+      return closeSecureRoute(accessSessionId, 1008, "invalid envelope", true);
+    resetSecureIdle(route);
+    if (!send(deviceId, msg))
+      return closeSecureRoute(accessSessionId, 1013, "device offline", false);
+    if (msg.type === "client_close")
+      closeSecureRoute(accessSessionId, 1000, "client closed", false);
+  });
+  ws.on("close", () => {
+    if (secureRoutes.get(accessSessionId) !== route) return;
+    closeSecureRoute(accessSessionId, 1000, "client disconnected", true);
+  });
+}
+
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(
     req.url ?? "/",
@@ -635,6 +875,21 @@ server.on("upgrade", (req, socket, head) => {
     return wss.handleUpgrade(req, socket, head, (ws) =>
       wss.emit("connection", ws, req),
     );
+  if (url.pathname === "/client-tunnel") {
+    const auth = consumeSecureWebTicket(req);
+    if (!auth) return rejectUpgrade(socket, 401, "invalid_web_ticket");
+    if (
+      secureRoutes.size >= secureGlobalLimit ||
+      secureCountForDevice(auth.deviceId) >= secureDeviceLimit ||
+      secureRoutes.has(auth.accessSessionId)
+    )
+      return rejectUpgrade(socket, 503, "secure_tunnel_capacity");
+    secureUpgradeAuth.set(req, auth);
+    return wss.handleUpgrade(req, socket, head, (ws) =>
+      wss.emit("connection", ws, req),
+    );
+  }
+  if (!allowLegacyWebProxy) return socket.destroy();
   const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
   const session = match ? null : webSession(req);
   const deviceId = match ? match[1] : session?.deviceId;
@@ -694,8 +949,15 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 wss.on("connection", (ws, req) => {
-  if (new URL(req.url ?? "/", "http://localhost").pathname !== "/device")
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  if (pathname === "/client-tunnel") {
+    const auth = secureUpgradeAuth.get(req);
+    if (!auth) return ws.close(4003, "invalid web ticket");
+    secureUpgradeAuth.delete(req);
+    setupSecureClient(ws, auth);
     return;
+  }
+  if (pathname !== "/device") return;
   ws.on("error", () => {
     // Invalid Companion frames must not terminate the Relay process.
   });
@@ -722,6 +984,16 @@ wss.on("connection", (ws, req) => {
       clearTimeout(authTimer);
       deviceConnections.get(authenticatedId)?.close(4002, "replaced");
       deviceConnections.set(authenticatedId, ws);
+      deviceCapabilities.set(
+        authenticatedId,
+        new Set(
+          Array.isArray(msg.payload?.capabilities)
+            ? msg.payload.capabilities.filter(
+                (value: unknown): value is string => typeof value === "string",
+              )
+            : [],
+        ),
+      );
       store.updateStatus(authenticatedId, "online", "offline");
       return ws.send(JSON.stringify(envelope("auth_ok", {})));
     }
@@ -736,11 +1008,55 @@ wss.on("connection", (ws, req) => {
     if (msg.type === "event") {
       if (Buffer.byteLength(JSON.stringify(msg.payload ?? null)) > eventPayloadLimit)
         return ws.close(1009, "event payload too large");
-      return store.addEvent(
-        deviceId as string,
-        msg.payload?.kind ?? "unknown",
-        msg.payload,
-      );
+      const payload = msg.payload;
+      if (
+        !payload ||
+        typeof payload !== "object" ||
+        Object.keys(payload).some((key) => key !== "kind") ||
+        typeof payload.kind !== "string" ||
+        payload.kind.length > 128
+      )
+        return ws.close(1008, "event metadata only");
+      return store.addEvent(deviceId as string, payload.kind);
+    }
+    if (
+      ["server_hello", "sealed", "device_close"].includes(msg.type) &&
+      typeof msg.payload?.accessSessionId === "string"
+    ) {
+      const accessSessionId = msg.payload.accessSessionId;
+      const route = secureRoutes.get(accessSessionId);
+      if (!route || route.deviceId !== deviceId) return;
+      route.bytes += Buffer.byteLength(JSON.stringify(msg));
+      if (route.bytes > secureSessionByteLimit)
+        return closeSecureRoute(
+          accessSessionId,
+          1009,
+          "secure byte limit",
+          true,
+        );
+      if (msg.type === "server_hello") {
+        if (!route.handshakeTimer) return;
+        clearTimeout(route.handshakeTimer);
+        delete route.handshakeTimer;
+      } else if (msg.type === "sealed" && route.handshakeTimer) {
+        return closeSecureRoute(
+          accessSessionId,
+          1008,
+          "handshake incomplete",
+          true,
+        );
+      }
+      resetSecureIdle(route);
+      if (route.socket.readyState === WebSocket.OPEN)
+        route.socket.send(JSON.stringify(msg));
+      if (msg.type === "device_close")
+        closeSecureRoute(
+          accessSessionId,
+          1008,
+          String(msg.payload?.reason ?? "device closed"),
+          false,
+        );
+      return;
     }
     if (msg.type === "http_res" && msg.channel) {
       const pending = pendingHttp.get(msg.channel);
@@ -804,6 +1120,7 @@ wss.on("connection", (ws, req) => {
     clearTimeout(authTimer);
     if (deviceId && deviceConnections.get(deviceId) === ws) {
       deviceConnections.delete(deviceId);
+      deviceCapabilities.delete(deviceId);
       closeDeviceTunnels(deviceId);
       store.updateStatus(deviceId, "offline", "offline");
     }
