@@ -116,6 +116,19 @@ function send(deviceId: string, message: Envelope): boolean {
 function envelope(type: string, payload: any, channel?: string): Envelope {
   return { v: 1, type, channel, id: randomUUID(), ts: Date.now(), payload };
 }
+function normalizeCloseCode(code: unknown): number | undefined {
+  if (typeof code !== "number") return undefined;
+  if (code === 1000 || code === 1001 || code === 1002 || code === 1003)
+    return code;
+  if (code >= 1007 && code <= 1014) return code;
+  if (code >= 3000 && code <= 4999) return code;
+  return undefined;
+}
+function closeSocket(socket: WebSocket, code: unknown, reason: unknown) {
+  const normalized = normalizeCloseCode(code);
+  if (normalized === undefined) socket.close();
+  else socket.close(normalized, String(reason ?? "").slice(0, 100));
+}
 function issueTokens(accountId: string) {
   const accessToken = signToken(
     { kind: "access", sub: accountId },
@@ -486,9 +499,8 @@ wss.on("connection", (ws, req) => {
         });
     }
     if (msg.type === "ws_close" && msg.channel) {
-      pendingWs
-        .get(msg.channel)
-        ?.socket.close(msg.payload?.code ?? 1000, msg.payload?.reason ?? "");
+      const socket = pendingWs.get(msg.channel)?.socket;
+      if (socket) closeSocket(socket, msg.payload?.code, msg.payload?.reason);
       pendingWs.delete(msg.channel);
     }
   });
