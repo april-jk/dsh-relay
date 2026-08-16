@@ -6,6 +6,7 @@ import {
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
+import type { AccessClientInfo } from "./access-info.js";
 
 export type Device = {
   id: string;
@@ -17,6 +18,13 @@ export type Device = {
   createdAt: number;
 };
 export type Account = { id: string; email: string };
+export type AccessSession = AccessClientInfo & {
+  id: string;
+  startedAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  status: "active" | "expired" | "ended";
+};
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -43,6 +51,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, account_id TEXT, name TEXT NOT NULL, device_token_hash TEXT, last_seen_at INTEGER, dsh_status TEXT NOT NULL DEFAULT 'offline', created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS pair_sessions (code TEXT PRIMARY KEY, device_id TEXT NOT NULL, device_secret_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, claimed_by TEXT, used INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS access_sessions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, account_id TEXT NOT NULL, device_label TEXT NOT NULL, platform TEXT NOT NULL, os_version TEXT, started_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, ended_reason TEXT);
+      CREATE INDEX IF NOT EXISTS access_sessions_device_started ON access_sessions(device_id, started_at DESC);
     `);
   }
   close() {
@@ -185,13 +195,75 @@ export class Store {
       .run(name, id, accountId);
   }
   unbind(id: string, accountId: string): boolean {
-    return (
-      this.db
+    const changed = this.db
         .prepare(
           "UPDATE devices SET account_id = NULL, device_token_hash = NULL WHERE id = ? AND account_id = ?",
         )
-        .run(id, accountId).changes > 0
-    );
+        .run(id, accountId).changes > 0;
+    if (changed) {
+      this.db
+        .prepare(
+          "UPDATE access_sessions SET ended_reason = 'unbound' WHERE device_id = ? AND ended_reason IS NULL",
+        )
+        .run(id);
+    }
+    return changed;
+  }
+
+  createAccessSession(
+    deviceId: string,
+    accountId: string,
+    info: AccessClientInfo,
+    expiresAt: number,
+  ): string {
+    const id = `access_${randomUUID()}`;
+    const now = Date.now();
+    this.db
+      .prepare(
+        "INSERT INTO access_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+      )
+      .run(
+        id,
+        deviceId,
+        accountId,
+        info.deviceLabel,
+        info.platform,
+        info.osVersion,
+        now,
+        now,
+        expiresAt,
+      );
+    this.db
+      .prepare("DELETE FROM access_sessions WHERE started_at < ?")
+      .run(now - 30 * 86400_000);
+    this.db
+      .prepare(
+        "DELETE FROM access_sessions WHERE device_id = ? AND id NOT IN (SELECT id FROM access_sessions WHERE device_id = ? ORDER BY started_at DESC LIMIT 500)",
+      )
+      .run(deviceId, deviceId);
+    return id;
+  }
+
+  touchAccessSession(id: string, deviceId: string) {
+    const now = Date.now();
+    this.db
+      .prepare(
+        "UPDATE access_sessions SET last_seen_at = ? WHERE id = ? AND device_id = ? AND ended_reason IS NULL AND expires_at > ? AND last_seen_at <= ?",
+      )
+      .run(now, id, deviceId, now, now - 60_000);
+  }
+
+  listAccessSessions(deviceId: string, limit: number): AccessSession[] {
+    const now = Date.now();
+    const rows = this.db
+      .prepare(
+        "SELECT id, device_label deviceLabel, platform, os_version osVersion, started_at startedAt, last_seen_at lastSeenAt, expires_at expiresAt, ended_reason endedReason FROM access_sessions WHERE device_id = ? ORDER BY started_at DESC LIMIT ?",
+      )
+      .all(deviceId, limit) as any[];
+    return rows.map(({ endedReason, ...row }) => ({
+      ...row,
+      status: endedReason ? "ended" : row.expiresAt <= now ? "expired" : "active",
+    }));
   }
   addEvent(deviceId: string, kind: string, payload: unknown) {
     this.db

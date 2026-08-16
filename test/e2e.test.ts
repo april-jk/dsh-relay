@@ -190,12 +190,32 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   const webResponse = await fetch(
     `${base}/s/${session.data.deviceId}/api/test?ticket=${encodeURIComponent(ticketResult.data.ticket)}`,
+    {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 raw-marker",
+      },
+    },
   );
   assert.equal(webResponse.status, 200);
   assert.equal(await webResponse.text(), "proxied:/api/test");
   const cookie = webResponse.headers.get("set-cookie");
   assert.match(cookie ?? "", /dsh_session=/);
   assert.match(cookie ?? "", /Path=\//);
+  const accessLogResponse = await fetch(
+    `${base}/device-management/${session.data.deviceId}/access-sessions`,
+    {
+      headers: { authorization: `Device ${confirmed.data.deviceToken}` },
+    },
+  );
+  assert.equal(accessLogResponse.status, 200);
+  const accessLog = (await accessLogResponse.json()) as any;
+  assert.equal(accessLog.sessions.length, 1);
+  assert.equal(accessLog.sessions[0].deviceLabel, "iPhone");
+  assert.equal(accessLog.sessions[0].platform, "ios");
+  assert.equal(accessLog.sessions[0].osVersion, "18.6");
+  assert.equal(accessLog.sessions[0].status, "active");
+  assert.doesNotMatch(JSON.stringify(accessLog), /raw-marker|user-agent/i);
   const absoluteAsset = await fetch(`${base}/assets/index.js`, {
     headers: { cookie: cookie ?? "" },
   });

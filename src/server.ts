@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { Store } from "./store.js";
 import { randomToken, signToken, verifyToken } from "./auth.js";
+import { accessClientInfo } from "./access-info.js";
 
 type Envelope = {
   v: 1;
@@ -73,10 +74,18 @@ function account(req: IncomingMessage) {
   const token = verifyToken(bearer(req), secret);
   return token?.kind === "access" ? String(token.sub) : null;
 }
-function webSessionDevice(req: IncomingMessage): string | null {
+function webSession(req: IncomingMessage): {
+  deviceId: string;
+  accessSessionId: string;
+} | null {
   const session = verifyToken(cookies(req).dsh_session, secret);
-  return session?.kind === "web-session" && typeof session.deviceId === "string"
-    ? session.deviceId
+  return session?.kind === "web-session" &&
+    typeof session.deviceId === "string" &&
+    typeof session.accessSessionId === "string"
+    ? {
+        deviceId: session.deviceId,
+        accessSessionId: session.accessSessionId,
+      }
     : null;
 }
 function isRelayApi(pathname: string) {
@@ -86,6 +95,7 @@ function isRelayApi(pathname: string) {
     pathname === "/web-ticket" ||
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/pair/") ||
+    pathname.startsWith("/device-management/") ||
     pathname.startsWith("/devices/")
   );
 }
@@ -228,6 +238,27 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       expiresIn: Number(process.env.WEB_TICKET_TTL_SECONDS ?? 60),
     });
   }
+  const accessSessionsRoute = routeMatch(
+    url.pathname,
+    /^\/device-management\/([^/]+)\/access-sessions$/,
+  );
+  if (accessSessionsRoute && req.method === "GET") {
+    const deviceToken = req.headers.authorization?.startsWith("Device ")
+      ? req.headers.authorization.slice(7)
+      : undefined;
+    if (
+      !deviceToken ||
+      !store.findDeviceByToken(accessSessionsRoute[1], deviceToken)
+    )
+      return json(res, 401, { error: "invalid_device_token" });
+    const requestedLimit = Number(url.searchParams.get("limit") ?? 50);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(100, Math.floor(requestedLimit)))
+      : 50;
+    return json(res, 200, {
+      sessions: store.listAccessSessions(accessSessionsRoute[1], limit),
+    });
+  }
   const deviceRoute = routeMatch(url.pathname, /^\/devices\/([^/]+)$/);
   if (deviceRoute && req.method === "PATCH") {
     const accountId = account(req);
@@ -250,10 +281,16 @@ function authorizeWeb(
   req: IncomingMessage,
   deviceId: string,
   url: URL,
-): { ok: boolean; setCookie?: string } {
+): { ok: boolean; setCookie?: string; accessSessionId?: string } {
   const session = verifyToken(cookies(req).dsh_session, secret);
-  if (session?.kind === "web-session" && session.deviceId === deviceId)
-    return { ok: true };
+  if (
+    session?.kind === "web-session" &&
+    session.deviceId === deviceId &&
+    typeof session.accessSessionId === "string"
+  ) {
+    store.touchAccessSession(session.accessSessionId, deviceId);
+    return { ok: true, accessSessionId: session.accessSessionId };
+  }
   const rawTicket = url.searchParams.get("ticket") ?? undefined;
   const ticket = verifyToken(rawTicket, secret);
   if (
@@ -265,8 +302,15 @@ function authorizeWeb(
     return { ok: false };
   consumedTickets.add(ticket.nonce);
   setTimeout(() => consumedTickets.delete(ticket.nonce), 65_000).unref();
+  const expiresAt = Date.now() + 2 * 3600_000;
+  const accessSessionId = store.createAccessSession(
+    deviceId,
+    String(ticket.sub),
+    accessClientInfo(req.headers["user-agent"]),
+    expiresAt,
+  );
   const sessionToken = signToken(
-    { kind: "web-session", sub: ticket.sub, deviceId },
+    { kind: "web-session", sub: ticket.sub, deviceId, accessSessionId },
     secret,
     2 * 3600_000,
   );
@@ -274,6 +318,7 @@ function authorizeWeb(
   const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
   return {
     ok: true,
+    accessSessionId,
     setCookie: `dsh_session=${sessionToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=7200${secure}`,
   };
 }
@@ -348,9 +393,15 @@ const server = http.createServer(async (req, res) => {
       );
     }
     if (!isRelayApi(url.pathname)) {
-      const deviceId = webSessionDevice(req);
-      if (!deviceId) return json(res, 401, { error: "invalid_web_session" });
-      return proxyHttp(req, res, deviceId, `${url.pathname}${url.search}`);
+      const session = webSession(req);
+      if (!session) return json(res, 401, { error: "invalid_web_session" });
+      store.touchAccessSession(session.accessSessionId, session.deviceId);
+      return proxyHttp(
+        req,
+        res,
+        session.deviceId,
+        `${url.pathname}${url.search}`,
+      );
     }
     return await api(req, res);
   } catch (error) {
@@ -373,8 +424,10 @@ server.on("upgrade", (req, socket, head) => {
       wss.emit("connection", ws, req),
     );
   const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
-  const deviceId = match ? match[1] : webSessionDevice(req);
+  const session = match ? null : webSession(req);
+  const deviceId = match ? match[1] : session?.deviceId;
   if (match && !authorizeWeb(req, deviceId!, url).ok) return socket.destroy();
+  if (session) store.touchAccessSession(session.accessSessionId, session.deviceId);
   if (!deviceId || !deviceConnections.has(deviceId)) return socket.destroy();
   const upstreamPath = match
     ? `${match[2] ?? "/"}${url.search}`
