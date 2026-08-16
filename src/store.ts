@@ -54,6 +54,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS access_sessions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, account_id TEXT NOT NULL, device_label TEXT NOT NULL, platform TEXT NOT NULL, os_version TEXT, started_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, ended_reason TEXT);
       CREATE INDEX IF NOT EXISTS access_sessions_device_started ON access_sessions(device_id, started_at DESC);
     `);
+    this.cleanupExpired();
   }
   close() {
     this.db.close();
@@ -90,7 +91,13 @@ export class Store {
         "SELECT account_id accountId, expires_at expiresAt FROM refresh_tokens WHERE token_hash = ?",
       )
       .get(hash(token)) as any;
-    if (!row || row.expiresAt < Date.now()) return null;
+    if (!row) return null;
+    if (row.expiresAt < Date.now()) {
+      this.db
+        .prepare("DELETE FROM refresh_tokens WHERE token_hash = ?")
+        .run(hash(token));
+      return null;
+    }
     this.db
       .prepare("DELETE FROM refresh_tokens WHERE token_hash = ?")
       .run(hash(token));
@@ -102,15 +109,19 @@ export class Store {
     deviceSecret: string;
     expiresAt: number;
   } {
-    const code = String(Math.floor(100000 + Math.random() * 900000));
     const deviceId = `dev_${randomUUID()}`;
     const deviceSecret = randomBytes(32).toString("hex");
     const now = Date.now();
     const expiresAt = now + 5 * 60_000;
-    this.db
-      .prepare("INSERT INTO pair_sessions VALUES (?, ?, ?, ?, NULL, 0, ?)")
-      .run(code, deviceId, hash(deviceSecret), expiresAt, now);
-    return { code, deviceId, deviceSecret, expiresAt };
+    const insert = this.db.prepare(
+      "INSERT OR IGNORE INTO pair_sessions VALUES (?, ?, ?, ?, NULL, 0, ?)",
+    );
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      if (insert.run(code, deviceId, hash(deviceSecret), expiresAt, now).changes)
+        return { code, deviceId, deviceSecret, expiresAt };
+    }
+    throw new Error("unable to allocate pairing code");
   }
   claimPair(code: string, accountId: string): { deviceId: string } | null {
     const row = this.db
@@ -274,5 +285,23 @@ export class Store {
         "DELETE FROM events WHERE device_id = ? AND id NOT IN (SELECT id FROM events WHERE device_id = ? ORDER BY created_at DESC LIMIT 50)",
       )
       .run(deviceId, deviceId);
+  }
+
+  cleanupExpired(now = Date.now()) {
+    const cleanup = this.db.transaction(() => ({
+      refreshTokens: this.db
+        .prepare("DELETE FROM refresh_tokens WHERE expires_at < ?")
+        .run(now).changes,
+      pairSessions: this.db
+        .prepare("DELETE FROM pair_sessions WHERE expires_at < ? OR (used = 1 AND created_at < ?)")
+        .run(now, now - 5 * 60_000).changes,
+      accessSessions: this.db
+        .prepare("DELETE FROM access_sessions WHERE started_at < ?")
+        .run(now - 30 * 86400_000).changes,
+      events: this.db
+        .prepare("DELETE FROM events WHERE created_at < ?")
+        .run(now - 30 * 86400_000).changes,
+    }));
+    return cleanup();
   }
 }

@@ -2,10 +2,19 @@ import http, { IncomingMessage, ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { Store } from "./store.js";
 import { randomToken, signToken, verifyToken } from "./auth.js";
 import { accessClientInfo } from "./access-info.js";
+import {
+  BodyTooLargeError,
+  clientAddress,
+  envInteger,
+  FixedWindowRateLimiter,
+  readBody,
+  readJsonBody,
+} from "./limits.js";
 
 type Envelope = {
   v: 1;
@@ -20,19 +29,51 @@ type PendingHttp = {
   timer: NodeJS.Timeout;
   deviceId: string;
   started: boolean;
+  responseBytes: number;
 };
-type PendingWs = { socket: WebSocket; timer?: NodeJS.Timeout };
+type PendingWs = {
+  socket: WebSocket;
+  deviceId: string;
+  timer?: NodeJS.Timeout;
+};
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const dbPath = process.env.DATABASE_PATH ?? "./data/relay.sqlite";
 const secret = process.env.JWT_SECRET ?? "local-development-secret-change-me";
+const apiBodyLimit = envInteger("MAX_API_BODY_BYTES", 64 * 1024);
+const tunnelBodyLimit = envInteger("MAX_TUNNEL_BODY_BYTES", 2 * 1024 * 1024);
+const tunnelResponseLimit = envInteger(
+  "MAX_TUNNEL_RESPONSE_BYTES",
+  32 * 1024 * 1024,
+);
+const wsPayloadLimit = envInteger("MAX_WS_PAYLOAD_BYTES", 4 * 1024 * 1024);
+const httpGlobalLimit = envInteger("MAX_PENDING_HTTP_GLOBAL", 512);
+const httpDeviceLimit = envInteger("MAX_PENDING_HTTP_PER_DEVICE", 32);
+const wsGlobalLimit = envInteger("MAX_TUNNEL_WS_GLOBAL", 256);
+const wsDeviceLimit = envInteger("MAX_TUNNEL_WS_PER_DEVICE", 16);
+const wsConnectionLimit = envInteger("MAX_WS_CONNECTIONS", 1_000);
+const apiRateLimit = envInteger("API_RATE_LIMIT_PER_MINUTE", 300);
+const authRateLimit = envInteger("AUTH_RATE_LIMIT_PER_MINUTE", 20);
+const pairRateLimit = envInteger("PAIR_RATE_LIMIT_PER_MINUTE", 30);
+const tunnelRateLimit = envInteger("TUNNEL_RATE_LIMIT_PER_MINUTE", 600);
+const upgradeRateLimit = envInteger("WS_UPGRADE_RATE_LIMIT_PER_MINUTE", 120);
+const eventPayloadLimit = envInteger("MAX_EVENT_PAYLOAD_BYTES", 64 * 1024);
+const trustProxy = ["1", "true"].includes(
+  (process.env.TRUST_PROXY ?? "").toLowerCase(),
+);
 mkdirSync(dirname(dbPath), { recursive: true });
 const store = new Store(dbPath);
 const deviceConnections = new Map<string, WebSocket>();
 const pendingHttp = new Map<string, PendingHttp>();
 const pendingWs = new Map<string, PendingWs>();
 const consumedTickets = new Set<string>();
+const rateLimiter = new FixedWindowRateLimiter();
+const maintenanceTimer = setInterval(() => {
+  rateLimiter.sweep();
+  store.cleanupExpired();
+}, 15 * 60_000);
+maintenanceTimer.unref();
 
 function httpTimeout(channel: string, res: ServerResponse) {
   return setTimeout(() => {
@@ -56,15 +97,83 @@ function json(
   });
   res.end(data);
 }
-async function body(req: IncomingMessage): Promise<any> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
-  if (!chunks.length) return {};
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    return null;
+function rateLimited(
+  req: IncomingMessage,
+  res: ServerResponse,
+  bucket: string,
+  maximum: number,
+): boolean {
+  const retryAfter = rateLimiter.take(
+    `${bucket}:${clientAddress(req, trustProxy)}`,
+    maximum,
+    60_000,
+  );
+  if (!retryAfter) return false;
+  json(
+    res,
+    429,
+    { error: "rate_limited", retryAfter },
+    { "retry-after": String(retryAfter) },
+  );
+  return true;
+}
+
+function apiRateLimited(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): boolean {
+  if (pathname === "/health") return false;
+  if (rateLimited(req, res, "api", apiRateLimit)) return true;
+  if (pathname.startsWith("/auth/"))
+    return rateLimited(req, res, "auth", authRateLimit);
+  if (pathname.startsWith("/pair/"))
+    return rateLimited(req, res, "pair", pairRateLimit);
+  return false;
+}
+
+function pendingForDevice<T extends { deviceId: string }>(
+  entries: Map<string, T>,
+  deviceId: string,
+): number {
+  let count = 0;
+  for (const pending of entries.values())
+    if (pending.deviceId === deviceId) count += 1;
+  return count;
+}
+
+function closeDeviceTunnels(deviceId: string) {
+  for (const [channel, pending] of pendingHttp) {
+    if (pending.deviceId !== deviceId) continue;
+    clearTimeout(pending.timer);
+    pendingHttp.delete(channel);
+    if (!pending.res.headersSent)
+      json(pending.res, 503, { reason: "device_offline" });
+    else pending.res.destroy(new Error("device disconnected"));
   }
+  for (const [channel, pending] of pendingWs) {
+    if (pending.deviceId !== deviceId) continue;
+    if (pending.timer) clearTimeout(pending.timer);
+    pendingWs.delete(channel);
+    pending.socket.close(1013, "device disconnected");
+  }
+}
+
+function rejectUpgrade(
+  socket: Duplex,
+  status: 429 | 503,
+  reason: "rate_limited" | "capacity_reached",
+  retryAfter = 1,
+) {
+  const text = status === 429 ? "Too Many Requests" : "Service Unavailable";
+  const payload = JSON.stringify({ error: reason });
+  socket.end(
+    `HTTP/1.1 ${status} ${text}\r\n` +
+      "Connection: close\r\n" +
+      "Content-Type: application/json\r\n" +
+      `Content-Length: ${Buffer.byteLength(payload)}\r\n` +
+      `Retry-After: ${retryAfter}\r\n\r\n${payload}`,
+  );
 }
 function bearer(req: IncomingMessage) {
   const value = req.headers.authorization;
@@ -162,7 +271,20 @@ async function api(req: IncomingMessage, res: ServerResponse) {
     req.url ?? "/",
     `http://${req.headers.host ?? "localhost"}`,
   );
-  const input = await body(req);
+  if (apiRateLimited(req, res, url.pathname)) return;
+  let input: any = {};
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    try {
+      input = await readJsonBody(req, apiBodyLimit);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError)
+        return json(res, 413, {
+          error: "request_too_large",
+          limit: apiBodyLimit,
+        });
+      throw error;
+    }
+  }
   if (req.method === "GET" && url.pathname === "/health")
     return json(res, 200, { ok: true });
   if (req.method === "GET" && url.pathname === "/app/version") {
@@ -375,11 +497,26 @@ async function proxyHttp(
     return json(res, 503, { reason: "device_offline" });
   if (device?.dsh_status !== "online")
     return json(res, 503, { reason: "dsh_offline" });
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  if (rateLimited(req, res, "tunnel", tunnelRateLimit)) return;
+  if (
+    pendingHttp.size >= httpGlobalLimit ||
+    pendingForDevice(pendingHttp, deviceId) >= httpDeviceLimit
+  )
+    return json(
+      res,
+      429,
+      { reason: "too_many_tunnels" },
+      { "retry-after": "1" },
+    );
   const channel = `ch_${randomUUID()}`;
   const timer = httpTimeout(channel, res);
-  pendingHttp.set(channel, { res, timer, deviceId, started: false });
+  pendingHttp.set(channel, {
+    res,
+    timer,
+    deviceId,
+    started: false,
+    responseBytes: 0,
+  });
   res.on("close", () => {
     const pending = pendingHttp.get(channel);
     if (!pending) return;
@@ -387,6 +524,19 @@ async function proxyHttp(
     pendingHttp.delete(channel);
     send(deviceId, envelope("http_close", {}, channel));
   });
+  let requestBody: Buffer;
+  try {
+    requestBody = await readBody(req, tunnelBodyLimit);
+  } catch (error) {
+    clearTimeout(timer);
+    pendingHttp.delete(channel);
+    if (error instanceof BodyTooLargeError)
+      return json(res, 413, {
+        reason: "request_too_large",
+        limit: tunnelBodyLimit,
+      });
+    throw error;
+  }
   const headers = {
     ...req.headers,
     cookie: upstreamCookie(req.headers.cookie),
@@ -402,7 +552,7 @@ async function proxyHttp(
           method: req.method,
           path,
           headers,
-          bodyB64: Buffer.concat(chunks).toString("base64"),
+          bodyB64: requestBody.toString("base64"),
         },
         channel,
       ),
@@ -414,51 +564,73 @@ async function proxyHttp(
   } else if (setCookie) res.setHeader("set-cookie", setCookie);
 }
 
-const server = http.createServer(async (req, res) => {
-  try {
-    const url = new URL(
-      req.url ?? "/",
-      `http://${req.headers.host ?? "localhost"}`,
-    );
-    const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
-    if (match) {
-      const auth = authorizeWeb(req, match[1], url);
-      if (!auth.ok) return json(res, 401, { error: "invalid_web_session" });
-      return proxyHttp(
-        req,
-        res,
-        match[1],
-        `${match[2] ?? "/"}${url.search}`,
-        auth.setCookie,
+const server = http.createServer(
+  {
+    maxHeaderSize: envInteger("MAX_HTTP_HEADER_BYTES", 32 * 1024),
+    headersTimeout: envInteger("HTTP_HEADERS_TIMEOUT_MS", 15_000),
+    requestTimeout: envInteger("HTTP_REQUEST_TIMEOUT_MS", 65_000),
+    keepAliveTimeout: envInteger("HTTP_KEEP_ALIVE_TIMEOUT_MS", 5_000),
+  },
+  async (req, res) => {
+    try {
+      const url = new URL(
+        req.url ?? "/",
+        `http://${req.headers.host ?? "localhost"}`,
       );
-    }
-    if (!isRelayApi(url.pathname)) {
-      const session = webSession(req);
-      if (!session) return json(res, 401, { error: "invalid_web_session" });
-      store.touchAccessSession(session.accessSessionId, session.deviceId);
-      return proxyHttp(
-        req,
-        res,
-        session.deviceId,
-        `${url.pathname}${url.search}`,
+      const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
+      if (match) {
+        const auth = authorizeWeb(req, match[1], url);
+        if (!auth.ok) return json(res, 401, { error: "invalid_web_session" });
+        return proxyHttp(
+          req,
+          res,
+          match[1],
+          `${match[2] ?? "/"}${url.search}`,
+          auth.setCookie,
+        );
+      }
+      if (!isRelayApi(url.pathname)) {
+        const session = webSession(req);
+        if (!session) return json(res, 401, { error: "invalid_web_session" });
+        store.touchAccessSession(session.accessSessionId, session.deviceId);
+        return proxyHttp(
+          req,
+          res,
+          session.deviceId,
+          `${url.pathname}${url.search}`,
+        );
+      }
+      return await api(req, res);
+    } catch (error) {
+      console.error(
+        "request failed",
+        error instanceof Error ? error.message : "unknown",
       );
+      if (!res.headersSent) json(res, 500, { error: "internal_error" });
     }
-    return await api(req, res);
-  } catch (error) {
-    console.error(
-      "request failed",
-      error instanceof Error ? error.message : "unknown",
-    );
-    if (!res.headersSent) json(res, 500, { error: "internal_error" });
-  }
-});
+  },
+);
+server.maxRequestsPerSocket = envInteger("MAX_REQUESTS_PER_SOCKET", 1_000);
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: wsPayloadLimit,
+  perMessageDeflate: false,
+});
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(
     req.url ?? "/",
     `http://${req.headers.host ?? "localhost"}`,
   );
+  const retryAfter = rateLimiter.take(
+    `ws-upgrade:${clientAddress(req, trustProxy)}`,
+    upgradeRateLimit,
+    60_000,
+  );
+  if (retryAfter)
+    return rejectUpgrade(socket, 429, "rate_limited", retryAfter);
+  if (wss.clients.size >= wsConnectionLimit)
+    return rejectUpgrade(socket, 503, "capacity_reached");
   if (url.pathname === "/device")
     return wss.handleUpgrade(req, socket, head, (ws) =>
       wss.emit("connection", ws, req),
@@ -469,13 +641,22 @@ server.on("upgrade", (req, socket, head) => {
   if (match && !authorizeWeb(req, deviceId!, url).ok) return socket.destroy();
   if (session) store.touchAccessSession(session.accessSessionId, session.deviceId);
   if (!deviceId || !deviceConnections.has(deviceId)) return socket.destroy();
+  if (
+    pendingWs.size >= wsGlobalLimit ||
+    pendingForDevice(pendingWs, deviceId) >= wsDeviceLimit
+  )
+    return rejectUpgrade(socket, 429, "capacity_reached");
   const upstreamPath = match
     ? `${match[2] ?? "/"}${url.search}`
     : `${url.pathname}${url.search}`;
   wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.on("error", () => {
+      // Protocol and payload errors are scoped to this browser connection.
+    });
     const channel = `ch_${randomUUID()}`;
     pendingWs.set(channel, {
       socket: ws,
+      deviceId,
       timer: setTimeout(() => ws.close(1013, "tunnel timeout"), 10_000),
     });
     const headers = {
@@ -501,6 +682,8 @@ server.on("upgrade", (req, socket, head) => {
       ),
     );
     ws.on("close", (code, reason) => {
+      const pending = pendingWs.get(channel);
+      if (pending?.timer) clearTimeout(pending.timer);
       pendingWs.delete(channel);
       send(
         deviceId,
@@ -513,6 +696,9 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (ws, req) => {
   if (new URL(req.url ?? "/", "http://localhost").pathname !== "/device")
     return;
+  ws.on("error", () => {
+    // Invalid Companion frames must not terminate the Relay process.
+  });
   let deviceId: string | null = null;
   const authTimer = setTimeout(() => ws.close(4001, "auth timeout"), 5_000);
   ws.on("message", (raw) => {
@@ -547,16 +733,29 @@ wss.on("connection", (ws, req) => {
         "online",
         msg.payload?.dsh === "online" ? "online" : "offline",
       );
-    if (msg.type === "event")
+    if (msg.type === "event") {
+      if (Buffer.byteLength(JSON.stringify(msg.payload ?? null)) > eventPayloadLimit)
+        return ws.close(1009, "event payload too large");
       return store.addEvent(
         deviceId as string,
         msg.payload?.kind ?? "unknown",
         msg.payload,
       );
+    }
     if (msg.type === "http_res" && msg.channel) {
       const pending = pendingHttp.get(msg.channel);
-      if (!pending) return;
+      if (!pending || pending.deviceId !== deviceId) return;
       clearTimeout(pending.timer);
+      const chunk = Buffer.from(msg.payload?.bodyB64 ?? "", "base64");
+      pending.responseBytes += chunk.length;
+      if (pending.responseBytes > tunnelResponseLimit) {
+        pendingHttp.delete(msg.channel);
+        send(deviceId, envelope("http_close", {}, msg.channel));
+        if (!pending.res.headersSent)
+          json(pending.res, 502, { reason: "response_too_large" });
+        else pending.res.destroy(new Error("tunnel response too large"));
+        return;
+      }
       if (!pending.started) {
         const headers = { ...(msg.payload?.headers ?? {}) };
         delete headers["content-length"];
@@ -567,7 +766,6 @@ wss.on("connection", (ws, req) => {
         pending.res.writeHead(msg.payload?.status ?? 502, headers);
         pending.started = true;
       }
-      const chunk = Buffer.from(msg.payload?.bodyB64 ?? "", "base64");
       if (chunk.length) pending.res.write(chunk);
       const final = msg.payload?.final !== false;
       if (final) {
@@ -579,20 +777,25 @@ wss.on("connection", (ws, req) => {
     }
     if (msg.type === "ws_open_ok" && msg.channel) {
       const pending = pendingWs.get(msg.channel);
-      if (pending?.timer) {
+      if (pending?.deviceId === deviceId && pending.timer) {
         clearTimeout(pending.timer);
         delete pending.timer;
       }
     }
     if (msg.type === "ws_frame" && msg.channel) {
       const pending = pendingWs.get(msg.channel);
-      if (pending?.socket.readyState === WebSocket.OPEN)
+      if (
+        pending?.deviceId === deviceId &&
+        pending.socket.readyState === WebSocket.OPEN
+      )
         pending.socket.send(Buffer.from(msg.payload?.dataB64 ?? "", "base64"), {
           binary: msg.payload?.opcode === 2,
         });
     }
     if (msg.type === "ws_close" && msg.channel) {
-      const socket = pendingWs.get(msg.channel)?.socket;
+      const pending = pendingWs.get(msg.channel);
+      if (pending?.deviceId !== deviceId) return;
+      const socket = pending.socket;
       if (socket) closeSocket(socket, msg.payload?.code, msg.payload?.reason);
       pendingWs.delete(msg.channel);
     }
@@ -601,6 +804,7 @@ wss.on("connection", (ws, req) => {
     clearTimeout(authTimer);
     if (deviceId && deviceConnections.get(deviceId) === ws) {
       deviceConnections.delete(deviceId);
+      closeDeviceTunnels(deviceId);
       store.updateStatus(deviceId, "offline", "offline");
     }
   });
@@ -611,6 +815,7 @@ server.listen(port, host, () =>
 );
 process.on("SIGTERM", () =>
   server.close(() => {
+    clearInterval(maintenanceTimer);
     store.close();
     process.exit(0);
   }),

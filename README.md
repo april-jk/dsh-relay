@@ -17,7 +17,31 @@ The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persis
 
 Create a Railway service from this directory, set `JWT_SECRET` to a long random value, and attach a persistent volume mounted at `/data`. Set `DATABASE_PATH=/data/relay.sqlite`. Railway's generated public domain must be used as the Relay base URL by the mobile app and Companion. The service must be behind Railway TLS; the Companion automatically converts an `https://` Relay URL to `wss://` for its device connection.
 
+Set `TRUST_PROXY=1` on Railway so rate limiting uses the first address supplied by Railway's trusted proxy. Leave it disabled when exposing the Node process directly.
+
 The MVP is intentionally single-instance. SQLite volume persistence and a single Relay replica are required until a shared store is introduced.
+
+## Resource limits
+
+The Relay rejects oversized requests before forwarding them and uses bounded in-memory rate and concurrency tracking. Defaults are suitable for an MVP deployment and can be adjusted through environment variables:
+
+| Variable | Default | Scope |
+| --- | ---: | --- |
+| `MAX_API_BODY_BYTES` | 65,536 | JSON API request body |
+| `MAX_TUNNEL_BODY_BYTES` | 2,097,152 | One forwarded HTTP request |
+| `MAX_TUNNEL_RESPONSE_BYTES` | 33,554,432 | One forwarded HTTP response |
+| `MAX_WS_PAYLOAD_BYTES` | 4,194,304 | One incoming WebSocket frame |
+| `MAX_PENDING_HTTP_PER_DEVICE` | 32 | Concurrent HTTP tunnels per computer |
+| `MAX_TUNNEL_WS_PER_DEVICE` | 16 | Concurrent WebSocket tunnels per computer |
+| `MAX_PENDING_HTTP_GLOBAL` | 512 | Concurrent HTTP tunnels per Relay instance |
+| `MAX_TUNNEL_WS_GLOBAL` | 256 | Concurrent WebSocket tunnels per Relay instance |
+| `API_RATE_LIMIT_PER_MINUTE` | 300 | API requests per client address |
+| `AUTH_RATE_LIMIT_PER_MINUTE` | 20 | Additional authentication limit per client address |
+| `PAIR_RATE_LIMIT_PER_MINUTE` | 30 | Additional pairing limit per client address |
+| `TUNNEL_RATE_LIMIT_PER_MINUTE` | 600 | Forwarded HTTP requests per client address |
+| `WS_UPGRADE_RATE_LIMIT_PER_MINUTE` | 120 | WebSocket upgrades per client address |
+
+Rate counters are intentionally instance-local, matching the single-instance MVP architecture. Expired refresh tokens, pairing sessions, access sessions, and events are cleaned at startup and every 15 minutes.
 
 ## Mobile release policy
 
@@ -26,7 +50,7 @@ The public `GET /app/version?platform=android|ios` endpoint drives update prompt
 ```bash
 APP_ANDROID_LATEST_VERSION=0.2.0
 APP_ANDROID_MINIMUM_VERSION=0.1.0
-APP_ANDROID_DOWNLOAD_URL=https://play.google.com/store/apps/details?id=com.deepseek.dshremote
+APP_ANDROID_DOWNLOAD_URL=https://play.google.com/store/apps/details?id=io.github.apriljk.dshremote
 APP_ANDROID_RELEASE_NOTES=Improved remote session stability.
 APP_IOS_LATEST_VERSION=0.2.0
 APP_IOS_MINIMUM_VERSION=0.1.0

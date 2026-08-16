@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,24 @@ async function waitForRelay() {
   }
   throw new Error("relay did not start");
 }
+async function chunkedOversizedRequest(path: string) {
+  return new Promise<{ status: number; data: any }>((resolve, reject) => {
+    const req = httpRequest(`${base}${path}`, { method: "POST" }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      res.on("end", () =>
+        resolve({
+          status: res.statusCode ?? 0,
+          data: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+        }),
+      );
+    });
+    req.on("error", reject);
+    req.write("x".repeat(800));
+    req.write("x".repeat(800));
+    req.end();
+  });
+}
 function open(url: string, options?: any): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url, options);
@@ -60,6 +79,11 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
       HOST: "127.0.0.1",
       DATABASE_PATH: join(dir, "relay.sqlite"),
       JWT_SECRET: "test-secret",
+      AUTH_RATE_LIMIT_PER_MINUTE: "3",
+      MAX_API_BODY_BYTES: "1024",
+      MAX_TUNNEL_BODY_BYTES: "1024",
+      MAX_TUNNEL_RESPONSE_BYTES: "1024",
+      MAX_WS_PAYLOAD_BYTES: "4096",
       APP_ANDROID_LATEST_VERSION: "0.2.0",
       APP_ANDROID_MINIMUM_VERSION: "0.1.0",
       APP_ANDROID_DOWNLOAD_URL: "https://example.com/android",
@@ -89,6 +113,40 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   });
   assert.equal(registered.response.status, 201);
   const access = registered.data.accessToken;
+  const invalidLoginOne = await request("/auth/login", "POST", {
+    email: "test@example.com",
+    password: "wrong-password",
+  });
+  assert.equal(invalidLoginOne.response.status, 401);
+  const invalidLoginTwo = await request("/auth/login", "POST", {
+    email: "test@example.com",
+    password: "wrong-password",
+  });
+  assert.equal(invalidLoginTwo.response.status, 401);
+  const limitedLogin = await request("/auth/login", "POST", {
+    email: "test@example.com",
+    password: "wrong-password",
+  });
+  assert.equal(limitedLogin.response.status, 429);
+  assert.equal(limitedLogin.data.error, "rate_limited");
+  assert.equal(limitedLogin.response.headers.get("retry-after"), "60");
+
+  const oversizedApi = await fetch(`${base}/web-ticket`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ padding: "x".repeat(2_000) }),
+  });
+  assert.equal(oversizedApi.status, 413);
+  assert.deepEqual(await oversizedApi.json(), {
+    error: "request_too_large",
+    limit: 1024,
+  });
+  const chunkedOversizedApi = await chunkedOversizedRequest("/web-ticket");
+  assert.equal(chunkedOversizedApi.status, 413);
+  assert.deepEqual(chunkedOversizedApi.data, {
+    error: "request_too_large",
+    limit: 1024,
+  });
   const session = await request("/pair/session", "POST", {});
   const claimed = await request(
     "/pair/claim",
@@ -170,7 +228,22 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
           payload: { bodyB64: "", seq: 2, final: true },
         }),
       );
-    } else if (msg.type === "http_req")
+    } else if (msg.type === "http_req" && msg.payload.path === "/api/large")
+      device.send(
+        JSON.stringify({
+          v: 1,
+          type: "http_res",
+          channel: msg.channel,
+          id: "large-response",
+          ts: Date.now(),
+          payload: {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+            bodyB64: Buffer.alloc(2_000, "x").toString("base64"),
+          },
+        }),
+      );
+    else if (msg.type === "http_req")
       device.send(
         JSON.stringify({
           v: 1,
@@ -247,6 +320,23 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   assert.equal(stream.status, 200);
   assert.equal(stream.headers.get("content-type"), "text/event-stream");
   assert.equal(await stream.text(), "data: ready\n\n");
+  const oversizedRequest = await fetch(`${base}/api/upload`, {
+    method: "POST",
+    headers: { cookie: cookie ?? "" },
+    body: "x".repeat(2_000),
+  });
+  assert.equal(oversizedRequest.status, 413);
+  assert.deepEqual(await oversizedRequest.json(), {
+    reason: "request_too_large",
+    limit: 1024,
+  });
+  const oversizedResponse = await fetch(`${base}/api/large`, {
+    headers: { cookie: cookie ?? "" },
+  });
+  assert.equal(oversizedResponse.status, 502);
+  assert.deepEqual(await oversizedResponse.json(), {
+    reason: "response_too_large",
+  });
   const reused = await fetch(
     `${base}/s/${session.data.deviceId}/?ticket=${encodeURIComponent(ticketResult.data.ticket)}`,
   );
@@ -260,7 +350,9 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   browser.send("new task");
   assert.equal(await echoed, "new task");
-  browser.close();
+  const oversizedSocketClosed = closed(browser);
+  browser.send(Buffer.alloc(8_000));
+  assert.equal(await oversizedSocketClosed, 1009);
   device.close();
   await new Promise((resolve) => setTimeout(resolve, 100));
   const offlineTicket = await request(
