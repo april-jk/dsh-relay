@@ -19,6 +19,12 @@ npm start
 
 默认监听地址是 `http://127.0.0.1:8787`。生产环境必须将 `DATABASE_PATH` 设置到持久化存储。任何公网部署都应提供 HTTPS/WSS；Relay 不会持有或记录隧道业务明文。
 
+## 版本发布
+
+每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.3`）后，GitHub Release 会自动创建。
+
+每个 Release 提供包含预编译 `dist/`、部署文件和生产依赖清单的 `.tar.gz` 与 `.zip`，并附带 `SHA256SUMS`。解压后先运行 `npm ci --omit=dev`，再运行 `npm start`；原生依赖会针对目标平台安装，而不是打包 CI 环境中的二进制。
+
 ## Railway
 
 从本目录创建 Railway Service，将 `JWT_SECRET` 设置为长随机值，并挂载持久卷到 `/data`。设置 `DATABASE_PATH=/data/relay.sqlite`。添加 HTTPS 自定义域名，例如 `relay.dshmobile.online`，然后在移动应用和 Companion 中使用该地址。Companion 会自动把 `https://` Relay URL 转换为设备连接所需的 `wss://`。
