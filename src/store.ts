@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import {
   createHash,
   randomBytes,
+  randomInt,
   randomUUID,
   scryptSync,
   timingSafeEqual,
@@ -117,7 +118,7 @@ export class Store {
       "INSERT OR IGNORE INTO pair_sessions VALUES (?, ?, ?, ?, NULL, 0, ?)",
     );
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const code = String(randomInt(100000, 1_000_000));
       if (insert.run(code, deviceId, hash(deviceSecret), expiresAt, now).changes)
         return { code, deviceId, deviceSecret, expiresAt };
     }

@@ -75,6 +75,7 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      NODE_ENV: "test",
       PORT: String(port),
       HOST: "127.0.0.1",
       DATABASE_PATH: join(dir, "relay.sqlite"),

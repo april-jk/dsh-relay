@@ -7,6 +7,11 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
+ARG VERSION=dev
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/april-jk/dsh-relay" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$VCS_REF"
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787 DATABASE_PATH=/data/relay.sqlite
 WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./

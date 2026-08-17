@@ -17,17 +17,17 @@ npm run build
 npm start
 ```
 
-The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persistent location in production. The Relay expects HTTPS/WSS in any public deployment and routes 0.1.3 sealed tunnel frames without receiving DSH plaintext.
+The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persistent location in production. The Relay expects HTTPS/WSS in any public deployment and routes 0.1.4 sealed tunnel frames without receiving DSH plaintext.
 
 ## Releases
 
-Every pull request and branch push installs locked dependencies, builds, tests, and audits the Relay in GitHub Actions. A tag that exactly matches the version in both `package.json` and `package-lock.json` (for example, `v0.1.3`) creates a GitHub Release automatically.
+Every pull request and branch push installs locked dependencies, builds, tests, and audits the Relay in GitHub Actions. A tag that exactly matches the version in both `package.json` and `package-lock.json` (for example, `v0.1.4`) creates a GitHub Release automatically.
 
-Each release contains `.tar.gz` and `.zip` archives with the compiled `dist/` output, deployment files, and production dependency manifests, plus `SHA256SUMS`. The same workflow publishes `ghcr.io/april-jk/dsh-relay:<version>` and `:latest`. After extracting an archive, run `npm ci --omit=dev` before `npm start`; native dependencies are installed for the target platform instead of being bundled from CI.
+Each release contains `.tar.gz` and `.zip` archives with the compiled `dist/` output, deployment files, and production dependency manifests, plus `SHA256SUMS`. The same workflow publishes `ghcr.io/april-jk/dsh-relay:<version>` and `:latest`. Only the highest stable SemVer tag may update `latest`; existing version images and release assets cannot be replaced with different content. After extracting an archive, run `npm ci --omit=dev` before `npm start`; native dependencies are installed for the target platform instead of being bundled from CI.
 
 ## Railway
 
-Create a Railway service from this directory, set `JWT_SECRET` to a long random value, and attach a persistent volume mounted at `/data`. Set `DATABASE_PATH=/data/relay.sqlite`. Add an HTTPS custom domain such as `relay.dshmobile.online` and use it as the Relay base URL in the mobile app and Companion. The Companion automatically converts an `https://` Relay URL to `wss://` for its device connection.
+Create a Railway service from this directory, set `JWT_SECRET` to a random value of at least 32 bytes, and attach a persistent volume mounted at `/data`. Production startup fails when this secret is missing, too short, or still set to a documented placeholder. Set `DATABASE_PATH=/data/relay.sqlite`. Add an HTTPS custom domain such as `relay.dshmobile.online` and use it as the Relay base URL in the mobile app and Companion. The Companion automatically converts an `https://` Relay URL to `wss://` for its device connection.
 
 Set `TRUST_PROXY=1` on Railway so rate limiting uses the first address supplied by Railway's trusted proxy. Leave it disabled when exposing the Node process directly.
 
@@ -41,7 +41,7 @@ The MVP is intentionally single-instance. SQLite volume persistence and a single
 cp .env.example .env
 ```
 
-Set a long random `JWT_SECRET`, then start the single-instance Relay:
+Set a random `JWT_SECRET` of at least 32 bytes, then start the single-instance Relay:
 
 ```bash
 docker compose up -d --build

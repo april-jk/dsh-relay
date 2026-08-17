@@ -1,11 +1,40 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { Store } from "../src/store.js";
+
+async function rejectedProductionStartup(jwtSecret?: string) {
+  const environment = { ...process.env, NODE_ENV: "production" };
+  if (jwtSecret === undefined) delete environment.JWT_SECRET;
+  else environment.JWT_SECRET = jwtSecret;
+  const child = spawn(process.execPath, ["dist/server.js"], {
+    cwd: process.cwd(),
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const [code] = await once(child, "exit");
+  return { code, stderr };
+}
+
+test("production startup rejects missing, short, and default JWT secrets", async () => {
+  for (const candidate of [
+    undefined,
+    "short-secret",
+    "local-development-secret-change-me",
+    "replace-this-in-production",
+  ]) {
+    const result = await rejectedProductionStartup(candidate);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /JWT_SECRET/);
+  }
+});
 
 test("stores event metadata without the Companion payload", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "dsh-relay-event-metadata-"));
@@ -29,6 +58,7 @@ test("fails closed when legacy proxy or a web ticket is unavailable", async (t) 
     cwd: process.cwd(),
     env: {
       ...process.env,
+      NODE_ENV: "test",
       PORT: String(port),
       HOST: "127.0.0.1",
       DATABASE_PATH: join(dir, "relay.sqlite"),
@@ -45,6 +75,16 @@ test("fails closed when legacy proxy or a web ticket is unavailable", async (t) 
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+
+  const version = await fetch(`${base}/app/version?platform=android`);
+  assert.equal(version.status, 200);
+  assert.deepEqual(await version.json(), {
+    platform: "android",
+    latestVersion: "0.1.4",
+    minimumVersion: "0.1.3",
+    downloadUrl: null,
+    releaseNotes: null,
+  });
 
   const legacy = await fetch(`${base}/s/dev_unknown/`);
   assert.equal(legacy.status, 426);

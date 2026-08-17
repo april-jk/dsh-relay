@@ -6,7 +6,7 @@
 
 用于 DSH 手机遥控 MVP 的云端 Relay。
 
-公共生产地址：`https://relay.dshmobile.online`。0.1.3 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
+公共生产地址：`https://relay.dshmobile.online`。0.1.4 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
 
 ## 本地运行
 
@@ -21,13 +21,13 @@ npm start
 
 ## 版本发布
 
-每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.3`）后，GitHub Release 会自动创建。
+每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.4`）后，GitHub Release 会自动创建。
 
-每个 Release 提供包含预编译 `dist/`、部署文件和生产依赖清单的 `.tar.gz` 与 `.zip`，并附带 `SHA256SUMS`。同一工作流还会发布 `ghcr.io/april-jk/dsh-relay:<version>` 与 `:latest`。解压后先运行 `npm ci --omit=dev`，再运行 `npm start`；原生依赖会针对目标平台安装，而不是打包 CI 环境中的二进制。
+每个 Release 提供包含预编译 `dist/`、部署文件和生产依赖清单的 `.tar.gz` 与 `.zip`，并附带 `SHA256SUMS`。同一工作流还会发布 `ghcr.io/april-jk/dsh-relay:<version>` 与 `:latest`。只有最高的稳定 SemVer 标签可以更新 `latest`；已有版本镜像和 Release 资产不能被不同内容覆盖。解压后先运行 `npm ci --omit=dev`，再运行 `npm start`；原生依赖会针对目标平台安装，而不是打包 CI 环境中的二进制。
 
 ## Railway
 
-从本目录创建 Railway Service，将 `JWT_SECRET` 设置为长随机值，并挂载持久卷到 `/data`。设置 `DATABASE_PATH=/data/relay.sqlite`。添加 HTTPS 自定义域名，例如 `relay.dshmobile.online`，然后在移动应用和 Companion 中使用该地址。Companion 会自动把 `https://` Relay URL 转换为设备连接所需的 `wss://`。
+从本目录创建 Railway Service，将 `JWT_SECRET` 设置为至少 32 字节的随机值，并挂载持久卷到 `/data`。生产环境缺少该 Secret、长度不足或仍使用文档占位值时，Relay 会拒绝启动。设置 `DATABASE_PATH=/data/relay.sqlite`。添加 HTTPS 自定义域名，例如 `relay.dshmobile.online`，然后在移动应用和 Companion 中使用该地址。Companion 会自动把 `https://` Relay URL 转换为设备连接所需的 `wss://`。
 
 在 Railway 中设置 `TRUST_PROXY=1`，让限流使用 Railway 可信代理提供的第一个地址。直接暴露 Node 进程时应保持禁用。
 
@@ -39,7 +39,7 @@ MVP 有意采用单实例架构。在引入共享存储前，必须使用 SQLite
 cp .env.example .env
 ```
 
-设置一个长随机 `JWT_SECRET`，然后启动单实例 Relay：
+设置一个至少 32 字节的随机 `JWT_SECRET`，然后启动单实例 Relay：
 
 ```bash
 docker compose up -d --build

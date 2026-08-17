@@ -5,7 +5,12 @@ import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { Store } from "./store.js";
-import { randomToken, signToken, verifyToken } from "./auth.js";
+import {
+  randomToken,
+  resolveJwtSecret,
+  signToken,
+  verifyToken,
+} from "./auth.js";
 import { accessClientInfo } from "./access-info.js";
 import {
   BodyTooLargeError,
@@ -48,7 +53,7 @@ type SecureRoute = {
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const dbPath = process.env.DATABASE_PATH ?? "./data/relay.sqlite";
-const secret = process.env.JWT_SECRET ?? "local-development-secret-change-me";
+const secret = resolveJwtSecret();
 const apiBodyLimit = envInteger("MAX_API_BODY_BYTES", 64 * 1024);
 const tunnelBodyLimit = envInteger("MAX_TUNNEL_BODY_BYTES", 2 * 1024 * 1024);
 const tunnelResponseLimit = envInteger(
@@ -444,7 +449,7 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       200,
       {
         platform,
-        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.3",
+        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.4",
         minimumVersion:
           configured(`APP_${prefix}_MINIMUM_VERSION`) ?? "0.1.3",
         downloadUrl: configured(`APP_${prefix}_DOWNLOAD_URL`),
