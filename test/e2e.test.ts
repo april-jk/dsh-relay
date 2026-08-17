@@ -146,6 +146,13 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   assert.match(webCookie, /dsh_web_auth=/);
   assert.match(webCookie, /HttpOnly/);
   assert.match(webCookie, /SameSite=Strict/);
+  const webSession = await fetch(`${base}/web-auth/session`, {
+    headers: { cookie: webCookie },
+  });
+  assert.deepEqual(await webSession.json(), {
+    authenticated: true,
+    email: "test@example.com",
+  });
   const webDevices = await fetch(`${base}/devices`, {
     headers: { cookie: webCookie },
   });

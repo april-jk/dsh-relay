@@ -2,19 +2,29 @@
 
 const elements = Object.fromEntries(
   [
-    "loading", "auth", "dashboard", "logout", "auth-form", "login-mode",
-    "register-mode", "auth-submit", "auth-error", "email", "password",
+    "loading", "auth", "dashboard", "connecting", "topbar", "logout",
+    "auth-form", "login-mode", "register-mode", "auth-submit", "auth-error",
+    "auth-title", "auth-description", "email", "password", "toggle-password",
     "show-pair", "pair-dialog", "pair-form", "close-pair", "pair-link",
     "pair-error", "pair-notice", "device-list", "empty-devices",
+    "show-settings", "settings-dialog", "close-settings", "settings-email",
+    "settings-relay", "relay-host", "connecting-device", "cancel-connecting",
   ].map((id) => [id, document.getElementById(id)]),
 );
 
 let authMode = "login";
 let pendingPair = parsePairValue(location.href);
+let signedInEmail = "";
+let connectionCancelled = false;
+
+const computerIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
 
 function showOnly(id) {
-  for (const name of ["loading", "auth", "dashboard"]) elements[name].classList.toggle("hidden", name !== id);
-  elements.logout.classList.toggle("hidden", id !== "dashboard");
+  for (const name of ["loading", "auth", "dashboard", "connecting"]) {
+    elements[name].classList.toggle("hidden", name !== id);
+  }
+  elements.topbar.classList.toggle("hidden", id !== "dashboard");
+  document.body.dataset.view = id;
 }
 
 function errorMessage(code) {
@@ -74,7 +84,7 @@ async function claimPair(pair) {
   await DshKeyStore.remove(`pending:${pair.code}`);
   history.replaceState(null, "", "/app/");
   pendingPair = null;
-  elements["pair-notice"].textContent = "电脑已绑定。现在可以建立端到端加密连接。";
+  elements["pair-notice"].textContent = "电脑已绑定，现在可以建立端到端加密连接。";
   elements["pair-notice"].classList.remove("hidden");
   return result.deviceId;
 }
@@ -88,13 +98,43 @@ function setAuthMode(mode) {
   elements["register-mode"].setAttribute("aria-selected", String(!login));
   elements.password.autocomplete = login ? "current-password" : "new-password";
   elements["auth-submit"].textContent = login ? "登录" : "创建账号";
+  elements["auth-title"].textContent = login ? "连接你的 DSH" : "创建账号";
+  elements["auth-description"].textContent = login
+    ? "登录后访问已绑定电脑上的 DeepSeek Harness。"
+    : "注册后，用手机扫码绑定你的电脑。";
   elements["auth-error"].textContent = "";
 }
 
 function deviceStatus(device) {
   if (!device.online) return { label: "电脑离线", className: "status-offline" };
-  if (device.dshStatus !== "online") return { label: "等待 DSH", className: "status-offline" };
-  return { label: "可以连接", className: "status-online" };
+  if (device.dshStatus !== "online") return { label: "DSH 未启动", className: "status-warning" };
+  return { label: "在线", className: "status-online" };
+}
+
+function lastSeen(value) {
+  if (!value) return "";
+  const time = new Date(value);
+  const elapsed = Math.max(0, Date.now() - time.getTime());
+  if (elapsed < 60_000) return "刚刚";
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
+  return `${time.getMonth() + 1} 月 ${time.getDate()} 日`;
+}
+
+function closeDeviceMenus(except) {
+  for (const menu of document.querySelectorAll(".device-menu-popover")) {
+    if (menu !== except) menu.classList.add("hidden");
+  }
+}
+
+async function renameDevice(device) {
+  const name = prompt("电脑名称", device.name)?.trim();
+  if (!name || name === device.name) return;
+  await api(`/devices/${encodeURIComponent(device.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: name.slice(0, 60) }),
+  });
+  await renderDevices();
 }
 
 async function renderDevices(data) {
@@ -105,35 +145,74 @@ async function renderDevices(data) {
     const status = deviceStatus(device);
     const article = document.createElement("article");
     article.className = "device-item";
-    const info = document.createElement("div");
+
+    const open = document.createElement("button");
+    open.className = "device-open";
+    open.type = "button";
+    open.disabled = !device.online || device.dshStatus !== "online";
+    open.setAttribute("aria-label", `打开 ${device.name}`);
+
+    const icon = document.createElement("span");
+    icon.className = "device-icon";
+    icon.innerHTML = computerIcon;
+    const copy = document.createElement("span");
+    copy.className = "device-copy";
     const name = document.createElement("h2");
     name.textContent = device.name;
-    const meta = document.createElement("div");
-    meta.className = "device-meta";
+    const meta = document.createElement("span");
+    meta.className = `device-meta ${status.className}`;
+    const dot = document.createElement("span");
+    dot.className = "status-dot";
     const state = document.createElement("span");
-    state.className = status.className;
+    state.className = "status-label";
     state.textContent = status.label;
-    const seen = document.createElement("span");
-    seen.textContent = device.lastSeenAt ? `最近连接 ${new Date(device.lastSeenAt).toLocaleString()}` : "尚未连接";
-    meta.append(state, seen);
-    info.append(name, meta);
-    const actions = document.createElement("div");
-    actions.className = "device-actions";
-    const open = document.createElement("button");
-    open.className = "primary-button";
-    open.type = "button";
-    open.textContent = "打开 DSH";
-    open.disabled = !device.online || device.dshStatus !== "online";
-    open.addEventListener("click", () => openRemote(device, open));
+    meta.append(dot, state);
+    const seenText = lastSeen(device.lastSeenAt);
+    if (seenText) {
+      const seen = document.createElement("span");
+      seen.className = "last-seen";
+      seen.textContent = seenText;
+      meta.append(seen);
+    }
+    copy.append(name, meta);
+    open.append(icon, copy);
+    open.addEventListener("click", () => openRemote(device));
+
+    const menu = document.createElement("div");
+    menu.className = "device-menu";
+    const menuButton = document.createElement("button");
+    menuButton.className = "icon-button";
+    menuButton.type = "button";
+    menuButton.textContent = "⋮";
+    menuButton.setAttribute("aria-label", `${device.name} 操作`);
+    menuButton.setAttribute("aria-expanded", "false");
+    const popover = document.createElement("div");
+    popover.className = "device-menu-popover hidden";
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.textContent = "重命名";
+    rename.addEventListener("click", () => renameDevice(device).catch(showNotice));
     const remove = document.createElement("button");
-    remove.className = "quiet-button";
+    remove.className = "remove-action";
     remove.type = "button";
-    remove.textContent = "移除";
-    remove.addEventListener("click", () => removeDevice(device));
-    actions.append(open, remove);
-    article.append(info, actions);
+    remove.textContent = "移除配对";
+    remove.addEventListener("click", () => removeDevice(device).catch(showNotice));
+    popover.append(rename, remove);
+    menuButton.addEventListener("click", () => {
+      const willOpen = popover.classList.contains("hidden");
+      closeDeviceMenus(popover);
+      popover.classList.toggle("hidden", !willOpen);
+      menuButton.setAttribute("aria-expanded", String(willOpen));
+    });
+    menu.append(menuButton, popover);
+    article.append(open, menu);
     elements["device-list"].append(article);
   }
+}
+
+function showNotice(error) {
+  elements["pair-notice"].textContent = error.message || String(error);
+  elements["pair-notice"].classList.remove("hidden");
 }
 
 async function waitForDevice(deviceId) {
@@ -171,13 +250,13 @@ function initializeTunnel(worker, options) {
   });
 }
 
-async function openRemote(device, button) {
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = "正在加密连接";
+async function openRemote(device) {
+  connectionCancelled = false;
+  elements["connecting-device"].textContent = `正在安全连接 ${device.name}。`;
+  showOnly("connecting");
   try {
     const masterKey = await DshKeyStore.get(device.id);
-    if (!masterKey) throw new Error("此浏览器没有这台电脑的加密密钥，请重新配对。 ");
+    if (!masterKey) throw new Error("此浏览器没有这台电脑的加密密钥，请重新配对。");
     const ticket = await api("/web-ticket", { method: "POST", body: JSON.stringify({ deviceId: device.id }) });
     const worker = await ensureWorker();
     await initializeTunnel(worker, {
@@ -187,17 +266,16 @@ async function openRemote(device, button) {
       ticket: ticket.ticket,
       masterKey,
     });
-    location.assign(`/remote/${encodeURIComponent(device.id)}/`);
+    if (!connectionCancelled) location.assign(`/remote/${encodeURIComponent(device.id)}/`);
   } catch (error) {
-    elements["pair-notice"].textContent = error.message;
-    elements["pair-notice"].classList.remove("hidden");
-    button.disabled = false;
-    button.textContent = original;
+    showOnly("dashboard");
+    showNotice(error);
   }
 }
 
 async function removeDevice(device) {
-  if (!confirm(`确定移除“${device.name}”吗？这台电脑需要重新配对才能访问。`)) return;
+  closeDeviceMenus();
+  if (!confirm(`确定移除“${device.name}”吗？移除后需要回到电脑前重新扫码。`)) return;
   await api(`/devices/${encodeURIComponent(device.id)}`, { method: "DELETE", body: "{}" });
   await DshKeyStore.remove(device.id);
   await renderDevices();
@@ -210,39 +288,66 @@ async function enterDashboard() {
       const deviceId = await claimPair(pendingPair);
       await waitForDevice(deviceId);
     } catch (error) {
-      elements["pair-notice"].textContent = error.message;
-      elements["pair-notice"].classList.remove("hidden");
+      showNotice(error);
     }
   }
   await renderDevices();
+}
+
+function updateAccountDetails(email) {
+  signedInEmail = email || signedInEmail;
+  elements["settings-email"].textContent = signedInEmail || "已登录";
+  elements["settings-relay"].textContent = location.origin;
 }
 
 elements["auth-form"].addEventListener("submit", async (event) => {
   event.preventDefault();
   elements["auth-error"].textContent = "";
   elements["auth-submit"].disabled = true;
+  const label = elements["auth-submit"].textContent;
+  elements["auth-submit"].textContent = authMode === "login" ? "正在登录…" : "正在创建…";
   try {
     await api(`/web-auth/${authMode}`, {
       method: "POST",
       body: JSON.stringify({ email: elements.email.value, password: elements.password.value }),
     });
+    updateAccountDetails(elements.email.value.trim().toLowerCase());
     await enterDashboard();
   } catch (error) {
     elements["auth-error"].textContent = error.message;
   } finally {
     elements["auth-submit"].disabled = false;
+    elements["auth-submit"].textContent = label;
   }
 });
 
 elements["login-mode"].addEventListener("click", () => setAuthMode("login"));
 elements["register-mode"].addEventListener("click", () => setAuthMode("register"));
+elements["toggle-password"].addEventListener("click", () => {
+  const revealing = elements.password.type === "password";
+  elements.password.type = revealing ? "text" : "password";
+  elements["toggle-password"].setAttribute("aria-label", revealing ? "隐藏密码" : "显示密码");
+  elements["toggle-password"].title = revealing ? "隐藏密码" : "显示密码";
+});
 elements.logout.addEventListener("click", async () => {
   await api("/web-auth/logout", { method: "POST", body: "{}" });
+  elements["settings-dialog"].close();
+  elements.password.value = "";
+  signedInEmail = "";
   showOnly("auth");
 });
 elements["show-pair"].addEventListener("click", () => elements["pair-dialog"].showModal());
 for (const trigger of document.querySelectorAll(".pair-trigger")) trigger.addEventListener("click", () => elements["pair-dialog"].showModal());
 elements["close-pair"].addEventListener("click", () => elements["pair-dialog"].close());
+elements["show-settings"].addEventListener("click", () => elements["settings-dialog"].showModal());
+elements["close-settings"].addEventListener("click", () => elements["settings-dialog"].close());
+elements["cancel-connecting"].addEventListener("click", () => {
+  connectionCancelled = true;
+  showOnly("dashboard");
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".device-menu")) closeDeviceMenus();
+});
 elements["pair-form"].addEventListener("submit", async (event) => {
   event.preventDefault();
   elements["pair-error"].textContent = "";
@@ -262,10 +367,16 @@ elements["pair-form"].addEventListener("submit", async (event) => {
 });
 
 (async function start() {
+  elements["relay-host"].textContent = location.host;
+  elements["settings-relay"].textContent = location.origin;
   try {
     const session = await api("/web-auth/session");
-    if (session.authenticated) await enterDashboard();
-    else showOnly("auth");
+    if (session.authenticated) {
+      updateAccountDetails(session.email);
+      await enterDashboard();
+    } else {
+      showOnly("auth");
+    }
   } catch {
     showOnly("auth");
   }

@@ -98,6 +98,12 @@ export class Store {
       .get(email.toLowerCase()) as any;
     return row ?? null;
   }
+  findAccountById(id: string): Account | null {
+    const row = this.db
+      .prepare("SELECT id, email FROM accounts WHERE id = ?")
+      .get(id) as Account | undefined;
+    return row ?? null;
+  }
   verifyPassword(email: string, password: string): Account | null {
     const row = this.findAccount(email);
     return row && passwordMatches(password, row.passwordHash)

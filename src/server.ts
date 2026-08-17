@@ -554,7 +554,12 @@ async function api(req: IncomingMessage, res: ServerResponse) {
     );
   }
   if (req.method === "GET" && url.pathname === "/web-auth/session") {
-    return json(res, 200, { authenticated: Boolean(account(req)) });
+    const accountId = account(req);
+    const signedInAccount = accountId ? store.findAccountById(accountId) : null;
+    return json(res, 200, {
+      authenticated: Boolean(signedInAccount),
+      email: signedInAccount?.email,
+    });
   }
   if (req.method === "POST" && url.pathname === "/web-auth/register") {
     if (!sameOrigin(req)) return json(res, 403, { error: "invalid_origin" });
