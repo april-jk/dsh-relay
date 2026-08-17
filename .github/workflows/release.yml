@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -49,6 +50,18 @@ jobs:
         run: npm test
       - name: Audit production dependencies
         run: npm audit --omit=dev
+      - name: Build and publish the Relay container
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/dsh-relay"
+          version="${RELEASE_TAG#v}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "${image}:${version}" -t "${image}:latest" .
+          docker push "${image}:${version}"
+          docker push "${image}:latest"
       - name: Package release archives
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -71,11 +84,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release/dsh-relay-"${GITHUB_REF_NAME}".tar.gz \
-            release/dsh-relay-"${GITHUB_REF_NAME}".zip \
-            release/SHA256SUMS \
-            --verify-tag \
-            --title "dsh-relay ${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --latest
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              release/dsh-relay-"${GITHUB_REF_NAME}".tar.gz \
+              release/dsh-relay-"${GITHUB_REF_NAME}".zip \
+              release/SHA256SUMS \
+              --clobber
+            gh release edit "$GITHUB_REF_NAME" --latest
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              release/dsh-relay-"${GITHUB_REF_NAME}".tar.gz \
+              release/dsh-relay-"${GITHUB_REF_NAME}".zip \
+              release/SHA256SUMS \
+              --verify-tag \
+              --title "dsh-relay ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --latest
+          fi

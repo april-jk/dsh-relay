@@ -23,7 +23,7 @@ The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persis
 
 Every pull request and branch push installs locked dependencies, builds, tests, and audits the Relay in GitHub Actions. A tag that exactly matches the version in both `package.json` and `package-lock.json` (for example, `v0.1.3`) creates a GitHub Release automatically.
 
-Each release contains `.tar.gz` and `.zip` archives with the compiled `dist/` output, deployment files, and production dependency manifests, plus `SHA256SUMS`. After extracting an archive, run `npm ci --omit=dev` before `npm start`; native dependencies are installed for the target platform instead of being bundled from CI.
+Each release contains `.tar.gz` and `.zip` archives with the compiled `dist/` output, deployment files, and production dependency manifests, plus `SHA256SUMS`. The same workflow publishes `ghcr.io/april-jk/dsh-relay:<version>` and `:latest`. After extracting an archive, run `npm ci --omit=dev` before `npm start`; native dependencies are installed for the target platform instead of being bundled from CI.
 
 ## Railway
 
@@ -52,23 +52,34 @@ Put an HTTPS reverse proxy in front of port `8787`. Keep `TRUST_PROXY=0` unless 
 
 ## Resource limits
 
-The Relay rejects oversized requests before forwarding them and uses bounded in-memory rate and concurrency tracking. Defaults are suitable for an MVP deployment and can be adjusted through environment variables:
+The Relay bounds secure-session count, ciphertext bytes, frame rate, handshake time, and idle time. Defaults are suitable for an MVP deployment and can be adjusted through environment variables:
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
 | `MAX_API_BODY_BYTES` | 65,536 | JSON API request body |
-| `MAX_TUNNEL_BODY_BYTES` | 2,097,152 | One forwarded HTTP request |
-| `MAX_TUNNEL_RESPONSE_BYTES` | 33,554,432 | One forwarded HTTP response |
 | `MAX_WS_PAYLOAD_BYTES` | 4,194,304 | One incoming WebSocket frame |
-| `MAX_PENDING_HTTP_PER_DEVICE` | 32 | Concurrent HTTP tunnels per computer |
-| `MAX_TUNNEL_WS_PER_DEVICE` | 16 | Concurrent WebSocket tunnels per computer |
-| `MAX_PENDING_HTTP_GLOBAL` | 512 | Concurrent HTTP tunnels per Relay instance |
-| `MAX_TUNNEL_WS_GLOBAL` | 256 | Concurrent WebSocket tunnels per Relay instance |
 | `API_RATE_LIMIT_PER_MINUTE` | 300 | API requests per client address |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | 20 | Additional authentication limit per client address |
 | `PAIR_RATE_LIMIT_PER_MINUTE` | 30 | Additional pairing limit per client address |
-| `TUNNEL_RATE_LIMIT_PER_MINUTE` | 600 | Forwarded HTTP requests per client address |
 | `WS_UPGRADE_RATE_LIMIT_PER_MINUTE` | 120 | WebSocket upgrades per client address |
+| `MAX_SECURE_TUNNELS_GLOBAL` | 512 | Concurrent sealed sessions per Relay instance |
+| `MAX_SECURE_TUNNELS_PER_DEVICE` | 8 | Concurrent sealed sessions per computer |
+| `MAX_SECURE_TUNNEL_BYTES` | 536,870,912 | Total ciphertext bytes per sealed session |
+| `SECURE_FRAME_RATE_LIMIT_PER_MINUTE` | 2,400 | Sealed frames per access session |
+| `SECURE_TUNNEL_IDLE_TIMEOUT_MS` | 300,000 | Sealed-session idle timeout |
+| `SECURE_HANDSHAKE_TIMEOUT_MS` | 10,000 | E2EE handshake timeout |
+
+The following limits apply only when the deprecated plaintext proxy is explicitly enabled with `ALLOW_LEGACY_WEB_PROXY=1`:
+
+| Variable | Default | Scope |
+| --- | ---: | --- |
+| `TUNNEL_RATE_LIMIT_PER_MINUTE` | 600 | Forwarded HTTP requests per client address |
+| `MAX_TUNNEL_BODY_BYTES` | 2,097,152 | One legacy HTTP request |
+| `MAX_TUNNEL_RESPONSE_BYTES` | 33,554,432 | One legacy HTTP response |
+| `MAX_PENDING_HTTP_PER_DEVICE` | 32 | Legacy concurrent HTTP tunnels per computer |
+| `MAX_TUNNEL_WS_PER_DEVICE` | 16 | Legacy concurrent WebSocket tunnels per computer |
+| `MAX_PENDING_HTTP_GLOBAL` | 512 | Legacy concurrent HTTP tunnels per Relay instance |
+| `MAX_TUNNEL_WS_GLOBAL` | 256 | Legacy concurrent WebSocket tunnels per Relay instance |
 
 Rate counters are intentionally instance-local, matching the single-instance MVP architecture. Expired refresh tokens, pairing sessions, access sessions, and events are cleaned at startup and every 15 minutes.
 
