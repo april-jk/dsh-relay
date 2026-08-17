@@ -8,6 +8,25 @@
 
 公共生产地址：`https://relay.dshmobile.online`。0.1.4 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
 
+## 浏览器访问
+
+直接访问 Relay 根地址会跳转到 `/app/`。该页面支持账号登录、注册、配对、设备列表，以及在 Safari 中打开原有 DSH Web UI。浏览器使用 Web Crypto 实现 `sealed-tunnel-v1`，密钥只保存在本机 IndexedDB 与当前 Service Worker 内存中。Relay 仍然只能看到账号与设备关系、连接时间、密文长度和流量时序。
+
+Companion 生成的二维码是 `https://<relay>/app/#/pair?code=...&key=...`。iPhone 相机可以直接打开；`#` 后的配对码与密钥不会发送到 Relay。旧版 JSON 二维码仍可由移动 App 解析，但新 Companion 默认生成浏览器链接。
+
+远程页面依赖 HTTPS、Service Worker、Web Crypto 与 WebSocket。生产部署必须设置 `PUBLIC_RELAY_URL=https://实际域名`，并保持 `ALLOW_LEGACY_WEB_PROXY=0`。
+
+## 管理后台
+
+后台地址是 `/admin/`。只有同时设置以下两个部署 Secret 时才启用：
+
+```bash
+ADMIN_USERNAME=relay-admin
+ADMIN_PASSWORD=使用密码管理器生成的独立强密码
+```
+
+管理会话使用独立的 HttpOnly、SameSite=Strict Cookie，不与普通用户会话复用。后台显示用户总数、新增用户、近 30 天活跃用户、已绑定与在线设备、访问会话趋势和最近访问记录。它不显示或保存 DSH 请求路径、任务文本、模型输出、HTTP 正文、WebSocket Frame、IP、token 或 E2EE 密钥。
+
 ## 本地运行
 
 ```bash
@@ -28,6 +47,8 @@ npm start
 ## Railway
 
 从本目录创建 Railway Service，将 `JWT_SECRET` 设置为至少 32 字节的随机值，并挂载持久卷到 `/data`。生产环境缺少该 Secret、长度不足或仍使用文档占位值时，Relay 会拒绝启动。设置 `DATABASE_PATH=/data/relay.sqlite`。添加 HTTPS 自定义域名，例如 `relay.dshmobile.online`，然后在移动应用和 Companion 中使用该地址。Companion 会自动把 `https://` Relay URL 转换为设备连接所需的 `wss://`。
+
+同时设置 `PUBLIC_RELAY_URL` 为完整 HTTPS Origin。需要后台时，再通过 Railway Secret 单独设置 `ADMIN_USERNAME` 与 `ADMIN_PASSWORD`；不要把真实值写入 `.env.example`、Git 或部署日志。
 
 在 Railway 中设置 `TRUST_PROXY=1`，让限流使用 Railway 可信代理提供的第一个地址。直接暴露 Node 进程时应保持禁用。
 

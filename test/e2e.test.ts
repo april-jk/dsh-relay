@@ -5,6 +5,7 @@ import { request as httpRequest } from "node:http";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { WebSocket } from "ws";
 
 const port = 19000 + Math.floor(Math.random() * 1000);
@@ -60,6 +61,13 @@ function open(url: string, options?: any): Promise<WebSocket> {
     ws.once("error", reject);
   });
 }
+function openWithProtocols(url: string, protocols: string[]): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, protocols);
+    ws.once("open", () => resolve(ws));
+    ws.once("error", reject);
+  });
+}
 function next(ws: WebSocket): Promise<any> {
   return new Promise((resolve) =>
     ws.once("message", (data) => resolve(JSON.parse(data.toString()))),
@@ -71,6 +79,7 @@ function closed(ws: WebSocket): Promise<number> {
 
 test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "dsh-relay-test-"));
+  const adminPassword = randomBytes(24).toString("base64url");
   const child = spawn(process.execPath, ["dist/server.js"], {
     cwd: process.cwd(),
     env: {
@@ -90,11 +99,20 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
       APP_ANDROID_MINIMUM_VERSION: "0.1.0",
       APP_ANDROID_DOWNLOAD_URL: "https://example.com/android",
       APP_ANDROID_RELEASE_NOTES: "Test release",
+      ADMIN_USERNAME: "relay-admin",
+      ADMIN_PASSWORD: adminPassword,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
   t.after(() => child.kill("SIGTERM"));
   await waitForRelay();
+
+  const root = await fetch(base, { redirect: "manual" });
+  assert.equal(root.status, 302);
+  assert.equal(root.headers.get("location"), "/app/");
+  const appPage = await fetch(`${base}/app/`);
+  assert.equal(appPage.status, 200);
+  assert.match(await appPage.text(), /DSH Remote/);
 
   const version = await request("/app/version?platform=android");
   assert.equal(version.response.status, 200);
@@ -115,6 +133,23 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   });
   assert.equal(registered.response.status, 201);
   const access = registered.data.accessToken;
+  const webLogin = await fetch(`${base}/web-auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: base },
+    body: JSON.stringify({
+      email: "test@example.com",
+      password: "correct-horse",
+    }),
+  });
+  assert.equal(webLogin.status, 200);
+  const webCookie = webLogin.headers.get("set-cookie") ?? "";
+  assert.match(webCookie, /dsh_web_auth=/);
+  assert.match(webCookie, /HttpOnly/);
+  assert.match(webCookie, /SameSite=Strict/);
+  const webDevices = await fetch(`${base}/devices`, {
+    headers: { cookie: webCookie },
+  });
+  assert.equal(webDevices.status, 200);
   const invalidLoginOne = await request("/auth/login", "POST", {
     email: "test@example.com",
     password: "wrong-password",
@@ -356,6 +391,49 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
     }),
   );
 
+  const browserTicketResponse = await fetch(`${base}/web-ticket`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: webCookie,
+      origin: base,
+    },
+    body: JSON.stringify({ deviceId: session.data.deviceId }),
+  });
+  assert.equal(browserTicketResponse.status, 200);
+  const browserTicket = (await browserTicketResponse.json()) as any;
+  const encodedTicket = Buffer.from(browserTicket.ticket).toString("base64url");
+  const protocolClient = await openWithProtocols(`${wsBase}/client-tunnel`, [
+    "dsh-e2ee-v1",
+    `dsh-ticket.${encodedTicket}`,
+  ]);
+  assert.equal(protocolClient.protocol, "dsh-e2ee-v1");
+  protocolClient.close();
+
+  const adminLogin = await fetch(`${base}/admin/api/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: base },
+    body: JSON.stringify({
+      username: "relay-admin",
+      password: adminPassword,
+    }),
+  });
+  assert.equal(adminLogin.status, 200);
+  const adminCookie = adminLogin.headers.get("set-cookie") ?? "";
+  assert.match(adminCookie, /dsh_admin=/);
+  const statsResponse = await fetch(`${base}/admin/api/stats`, {
+    headers: { cookie: adminCookie },
+  });
+  assert.equal(statsResponse.status, 200);
+  const stats = (await statsResponse.json()) as any;
+  assert.equal(stats.users.total, 1);
+  assert.equal(stats.devices.paired, 1);
+  assert.ok(stats.sessions.last24h >= 2);
+  assert.ok(
+    stats.recentSessions.some((entry: any) => entry.status === "ended"),
+  );
+  assert.equal(stats.daily.length, 30);
+
   const ticketResult = await request(
     "/web-ticket",
     "POST",
@@ -384,7 +462,7 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
   );
   assert.equal(accessLogResponse.status, 200);
   const accessLog = (await accessLogResponse.json()) as any;
-  assert.equal(accessLog.sessions.length, 2);
+  assert.equal(accessLog.sessions.length, 3);
   const iphoneSession = accessLog.sessions.find(
     (entry: any) => entry.deviceLabel === "iPhone",
   );

@@ -8,6 +8,23 @@ Cloud Relay for the DSH mobile remote-control MVP.
 
 Public production endpoint: `https://relay.dshmobile.online`
 
+## Browser access
+
+The Relay root redirects to `/app/`, a mobile-first web client for account access, pairing, device selection, and the original DSH Web UI. It implements `sealed-tunnel-v1` with Web Crypto. Device keys remain in the browser's IndexedDB and active Service Worker memory; the Relay still sees only routing metadata, ciphertext sizes, and timing.
+
+New Companion QR codes are HTTPS links shaped as `https://<relay>/app/#/pair?code=...&key=...`. iPhone Camera can open them directly, and URL fragments are not sent to the Relay. Production requires HTTPS and `PUBLIC_RELAY_URL=https://your-relay.example` with `ALLOW_LEGACY_WEB_PROXY=0`.
+
+## Administration
+
+`/admin/` is disabled until both credentials are configured as deployment secrets:
+
+```bash
+ADMIN_USERNAME=relay-admin
+ADMIN_PASSWORD=a-unique-password-from-your-password-manager
+```
+
+The isolated HttpOnly admin session exposes account, device, and access-session aggregates only. It never exposes DSH paths, task content, HTTP bodies, WebSocket frames, IP addresses, tokens, or encryption keys.
+
 ## Local
 
 ```bash

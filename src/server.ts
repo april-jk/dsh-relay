@@ -1,7 +1,7 @@
 import http, { IncomingMessage, ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { Store } from "./store.js";
@@ -20,6 +20,7 @@ import {
   readBody,
   readJsonBody,
 } from "./limits.js";
+import { isWebAsset, serveWeb } from "./web.js";
 
 type Envelope = {
   v: 1;
@@ -54,6 +55,18 @@ const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
 const dbPath = process.env.DATABASE_PATH ?? "./data/relay.sqlite";
 const secret = resolveJwtSecret();
+const adminUsername = process.env.ADMIN_USERNAME?.trim() ?? "";
+const adminPassword = process.env.ADMIN_PASSWORD ?? "";
+if (
+  process.env.NODE_ENV === "production" &&
+  ((adminUsername && !adminPassword) ||
+    (!adminUsername && adminPassword) ||
+    (adminPassword && adminPassword.length < 12))
+) {
+  throw new Error(
+    "ADMIN_USERNAME and ADMIN_PASSWORD (at least 12 characters) must be configured together",
+  );
+}
 const apiBodyLimit = envInteger("MAX_API_BODY_BYTES", 64 * 1024);
 const tunnelBodyLimit = envInteger("MAX_TUNNEL_BODY_BYTES", 2 * 1024 * 1024);
 const tunnelResponseLimit = envInteger(
@@ -133,6 +146,7 @@ function json(
   res.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(data),
+    "cache-control": "no-store",
     ...headers,
   });
   res.end(data);
@@ -167,6 +181,8 @@ function apiRateLimited(
   if (rateLimited(req, res, "api", apiRateLimit)) return true;
   if (pathname.startsWith("/auth/"))
     return rateLimited(req, res, "auth", authRateLimit);
+  if (pathname.startsWith("/web-auth/") || pathname === "/admin/api/login")
+    return rateLimited(req, res, "browser-auth", authRateLimit);
   if (pathname.startsWith("/pair/"))
     return rateLimited(req, res, "pair", pairRateLimit);
   return false;
@@ -227,6 +243,7 @@ function closeSecureRoute(
   const route = secureRoutes.get(accessSessionId);
   if (!route) return;
   secureRoutes.delete(accessSessionId);
+  store.endAccessSession(accessSessionId, reason);
   if (route.handshakeTimer) clearTimeout(route.handshakeTimer);
   clearTimeout(route.idleTimer);
   if (notifyDevice)
@@ -281,8 +298,10 @@ function bearer(req: IncomingMessage) {
   return value?.startsWith("Bearer ") ? value.slice(7) : undefined;
 }
 function account(req: IncomingMessage) {
-  const token = verifyToken(bearer(req), secret);
-  return token?.kind === "access" ? String(token.sub) : null;
+  const access = verifyToken(bearer(req), secret);
+  if (access?.kind === "access") return String(access.sub);
+  const web = verifyToken(cookies(req).dsh_web_auth, secret);
+  return web?.kind === "web-access" ? String(web.sub) : null;
 }
 function webSession(req: IncomingMessage): {
   deviceId: string;
@@ -304,6 +323,8 @@ function isRelayApi(pathname: string) {
     pathname === "/app/version" ||
     pathname === "/devices" ||
     pathname === "/web-ticket" ||
+    pathname.startsWith("/web-auth/") ||
+    pathname.startsWith("/admin/api/") ||
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/pair/") ||
     pathname.startsWith("/device-management/") ||
@@ -367,6 +388,68 @@ function configured(name: string): string | null {
   return process.env[name]?.trim() || null;
 }
 
+function requestOrigin(req: IncomingMessage): string {
+  const configuredOrigin = configured("PUBLIC_RELAY_URL");
+  if (configuredOrigin) return new URL(configuredOrigin).origin;
+  const protocol = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  return `${protocol}://${req.headers.host ?? "localhost"}`;
+}
+
+function sameOrigin(req: IncomingMessage): boolean {
+  if (req.headers["sec-fetch-site"] === "cross-site") return false;
+  const origin = req.headers.origin;
+  return !origin || origin === requestOrigin(req);
+}
+
+function cookieSecure(req: IncomingMessage): string {
+  return requestOrigin(req).startsWith("https://") ? "; Secure" : "";
+}
+
+function setWebAuthCookie(req: IncomingMessage, res: ServerResponse, accountId: string) {
+  const token = signToken(
+    { kind: "web-access", sub: accountId },
+    secret,
+    12 * 3600_000,
+  );
+  res.setHeader(
+    "set-cookie",
+    `dsh_web_auth=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${cookieSecure(req)}`,
+  );
+}
+
+function clearCookie(
+  req: IncomingMessage,
+  res: ServerResponse,
+  name: string,
+  path = "/",
+) {
+  res.setHeader(
+    "set-cookie",
+    `${name}=; HttpOnly; SameSite=Strict; Path=${path}; Max-Age=0${cookieSecure(req)}`,
+  );
+}
+
+function adminEnabled(): boolean {
+  return Boolean(adminUsername && adminPassword);
+}
+
+function sameValue(left: string, right: string): boolean {
+  const a = createHash("sha256").update(left).digest();
+  const b = createHash("sha256").update(right).digest();
+  return timingSafeEqual(a, b);
+}
+
+function adminAuthenticated(req: IncomingMessage): boolean {
+  const token = verifyToken(cookies(req).dsh_admin, secret);
+  return token?.kind === "admin-session" && token.sub === adminUsername;
+}
+
+function requireBrowserMutation(req: IncomingMessage, res: ServerResponse): boolean {
+  if (bearer(req) || sameOrigin(req)) return true;
+  json(res, 403, { error: "invalid_origin" });
+  return false;
+}
+
 function secureTunnelUrl(req: IncomingMessage): string {
   const configuredOrigin = configured("PUBLIC_RELAY_URL");
   const origin = configuredOrigin
@@ -382,7 +465,19 @@ function secureTunnelUrl(req: IncomingMessage): string {
 
 function webTicketAuthorization(req: IncomingMessage) {
   const value = req.headers.authorization;
-  return value?.startsWith("WebTicket ") ? value.slice(10) : undefined;
+  if (value?.startsWith("WebTicket ")) return value.slice(10);
+  const protocols = (req.headers["sec-websocket-protocol"] ?? "")
+    .split(",")
+    .map((protocol) => protocol.trim());
+  const encoded = protocols
+    .find((protocol) => protocol.startsWith("dsh-ticket."))
+    ?.slice("dsh-ticket.".length);
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) return undefined;
+  try {
+    return Buffer.from(encoded, "base64url").toString("utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 function consumeSecureWebTicket(req: IncomingMessage): {
@@ -458,6 +553,77 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       { "cache-control": "public, max-age=300" },
     );
   }
+  if (req.method === "GET" && url.pathname === "/web-auth/session") {
+    return json(res, 200, { authenticated: Boolean(account(req)) });
+  }
+  if (req.method === "POST" && url.pathname === "/web-auth/register") {
+    if (!sameOrigin(req)) return json(res, 403, { error: "invalid_origin" });
+    if (
+      !input?.email ||
+      typeof input.password !== "string" ||
+      input.password.length < 8
+    )
+      return json(res, 400, { error: "invalid_credentials" });
+    try {
+      const created = store.createAccount(input.email, input.password);
+      setWebAuthCookie(req, res, created.id);
+      return json(res, 201, { ok: true });
+    } catch {
+      return json(res, 409, { error: "email_exists" });
+    }
+  }
+  if (req.method === "POST" && url.pathname === "/web-auth/login") {
+    if (!sameOrigin(req)) return json(res, 403, { error: "invalid_origin" });
+    const found = store.verifyPassword(input?.email ?? "", input?.password ?? "");
+    if (!found) return json(res, 401, { error: "invalid_credentials" });
+    setWebAuthCookie(req, res, found.id);
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === "POST" && url.pathname === "/web-auth/logout") {
+    if (!sameOrigin(req)) return json(res, 403, { error: "invalid_origin" });
+    clearCookie(req, res, "dsh_web_auth");
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === "GET" && url.pathname === "/admin/api/session") {
+    return json(res, 200, {
+      enabled: adminEnabled(),
+      authenticated: adminAuthenticated(req),
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/admin/api/login") {
+    if (!sameOrigin(req)) return json(res, 403, { error: "invalid_origin" });
+    const username = adminUsername;
+    const password = adminPassword;
+    if (
+      !username ||
+      !password ||
+      typeof input?.username !== "string" ||
+      typeof input?.password !== "string" ||
+      !sameValue(username, input.username) ||
+      !sameValue(password, input.password)
+    )
+      return json(res, 401, { error: "invalid_credentials" });
+    const token = signToken(
+      { kind: "admin-session", sub: username },
+      secret,
+      8 * 3600_000,
+    );
+    res.setHeader(
+      "set-cookie",
+      `dsh_admin=${token}; HttpOnly; SameSite=Strict; Path=/admin; Max-Age=28800${cookieSecure(req)}`,
+    );
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === "POST" && url.pathname === "/admin/api/logout") {
+    if (!sameOrigin(req)) return json(res, 403, { error: "invalid_origin" });
+    clearCookie(req, res, "dsh_admin", "/admin");
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === "GET" && url.pathname === "/admin/api/stats") {
+    return adminAuthenticated(req)
+      ? json(res, 200, store.adminStats())
+      : json(res, 401, { error: "unauthorized" });
+  }
   if (req.method === "POST" && url.pathname === "/auth/register") {
     if (
       !input?.email ||
@@ -487,6 +653,7 @@ async function api(req: IncomingMessage, res: ServerResponse) {
   if (req.method === "POST" && url.pathname === "/pair/session")
     return json(res, 201, store.createPair());
   if (req.method === "POST" && url.pathname === "/pair/claim") {
+    if (!requireBrowserMutation(req, res)) return;
     const accountId = account(req);
     if (!accountId) return json(res, 401, { error: "unauthorized" });
     const claimed = store.claimPair(String(input?.code ?? ""), accountId);
@@ -516,6 +683,7 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       : json(res, 401, { error: "unauthorized" });
   }
   if (req.method === "POST" && url.pathname === "/web-ticket") {
+    if (!requireBrowserMutation(req, res)) return;
     const accountId = account(req);
     const device = store.device(input?.deviceId ?? "");
     if (!accountId || !device || device.account_id !== accountId)
@@ -588,6 +756,7 @@ async function api(req: IncomingMessage, res: ServerResponse) {
   }
   const deviceRoute = routeMatch(url.pathname, /^\/devices\/([^/]+)$/);
   if (deviceRoute && req.method === "PATCH") {
+    if (!requireBrowserMutation(req, res)) return;
     const accountId = account(req);
     if (!accountId || typeof input?.name !== "string" || !input.name.trim())
       return json(res, 400, { error: "invalid_request" });
@@ -595,6 +764,7 @@ async function api(req: IncomingMessage, res: ServerResponse) {
     return json(res, 200, { ok: true });
   }
   if (deviceRoute && req.method === "DELETE") {
+    if (!requireBrowserMutation(req, res)) return;
     const accountId = account(req);
     if (!accountId || !store.unbind(deviceRoute[1], accountId))
       return json(res, 404, { error: "not_found" });
@@ -746,6 +916,7 @@ const server = http.createServer(
         req.url ?? "/",
         `http://${req.headers.host ?? "localhost"}`,
       );
+      if (isWebAsset(url.pathname) && serveWeb(req, res, url.pathname)) return;
       const match = /^\/s\/([^/]+)(\/.*)?$/.exec(url.pathname);
       if (match) {
         if (!allowLegacyWebProxy)
@@ -789,6 +960,9 @@ const wss = new WebSocketServer({
   noServer: true,
   maxPayload: wsPayloadLimit,
   perMessageDeflate: false,
+  handleProtocols(protocols) {
+    return protocols.has("dsh-e2ee-v1") ? "dsh-e2ee-v1" : false;
+  },
 });
 
 function setupSecureClient(

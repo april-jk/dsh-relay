@@ -124,6 +124,7 @@ jobs:
           source_date_epoch="$(git show -s --format=%ct HEAD)"
           mkdir -p "${output_dir}/${archive_root}"
           cp -R dist "${output_dir}/${archive_root}/dist"
+          cp -R web "${output_dir}/${archive_root}/web"
           cp package.json package-lock.json README.md README.zh-CN.md LICENSE \
             .env.example Dockerfile compose.yml railway.json \
             "${output_dir}/${archive_root}/"

@@ -27,6 +27,29 @@ export type AccessSession = AccessClientInfo & {
   status: "active" | "expired" | "ended";
 };
 
+export type AdminStats = {
+  generatedAt: number;
+  users: { total: number; new24h: number; new7d: number; new30d: number };
+  devices: { total: number; paired: number; online: number; dshOnline: number };
+  sessions: {
+    active: number;
+    last24h: number;
+    last7d: number;
+    last30d: number;
+    activeUsers30d: number;
+  };
+  daily: Array<{ day: string; users: number; sessions: number }>;
+  recentSessions: Array<{
+    id: string;
+    email: string;
+    deviceName: string;
+    platform: string;
+    startedAt: number;
+    lastSeenAt: number;
+    status: "active" | "expired" | "ended";
+  }>;
+};
+
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -265,6 +288,14 @@ export class Store {
       .run(now, id, deviceId, now, now - 60_000);
   }
 
+  endAccessSession(id: string, reason: string) {
+    this.db
+      .prepare(
+        "UPDATE access_sessions SET ended_reason = ?, last_seen_at = ? WHERE id = ? AND ended_reason IS NULL",
+      )
+      .run(reason.slice(0, 100), Date.now(), id);
+  }
+
   listAccessSessions(deviceId: string, limit: number): AccessSession[] {
     const now = Date.now();
     const rows = this.db
@@ -276,6 +307,118 @@ export class Store {
       ...row,
       status: endedReason ? "ended" : row.expiresAt <= now ? "expired" : "active",
     }));
+  }
+
+  adminStats(now = Date.now()): AdminStats {
+    const count = (sql: string, ...params: unknown[]) =>
+      Number((this.db.prepare(sql).get(...params) as { value: number }).value);
+    const since24h = now - 86400_000;
+    const since7d = now - 7 * 86400_000;
+    const since30d = now - 30 * 86400_000;
+    const startDay = new Date(since30d);
+    startDay.setUTCHours(0, 0, 0, 0);
+    const userRows = this.db
+      .prepare(
+        "SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') day, COUNT(*) value FROM accounts WHERE created_at >= ? GROUP BY day",
+      )
+      .all(startDay.getTime()) as Array<{ day: string; value: number }>;
+    const sessionRows = this.db
+      .prepare(
+        "SELECT strftime('%Y-%m-%d', started_at / 1000, 'unixepoch') day, COUNT(*) value FROM access_sessions WHERE started_at >= ? GROUP BY day",
+      )
+      .all(startDay.getTime()) as Array<{ day: string; value: number }>;
+    const usersByDay = new Map(userRows.map((row) => [row.day, row.value]));
+    const sessionsByDay = new Map(
+      sessionRows.map((row) => [row.day, row.value]),
+    );
+    const daily: AdminStats["daily"] = [];
+    for (let offset = 29; offset >= 0; offset -= 1) {
+      const date = new Date(now - offset * 86400_000);
+      const day = date.toISOString().slice(0, 10);
+      daily.push({
+        day,
+        users: usersByDay.get(day) ?? 0,
+        sessions: sessionsByDay.get(day) ?? 0,
+      });
+    }
+    const recent = this.db
+      .prepare(
+        `SELECT s.id, a.email, d.name deviceName, s.platform,
+                s.started_at startedAt, s.last_seen_at lastSeenAt,
+                s.expires_at expiresAt, s.ended_reason endedReason
+           FROM access_sessions s
+           JOIN accounts a ON a.id = s.account_id
+           JOIN devices d ON d.id = s.device_id
+          ORDER BY s.started_at DESC
+          LIMIT 50`,
+      )
+      .all() as Array<{
+      id: string;
+      email: string;
+      deviceName: string;
+      platform: string;
+      startedAt: number;
+      lastSeenAt: number;
+      expiresAt: number;
+      endedReason: string | null;
+    }>;
+    return {
+      generatedAt: now,
+      users: {
+        total: count("SELECT COUNT(*) value FROM accounts"),
+        new24h: count(
+          "SELECT COUNT(*) value FROM accounts WHERE created_at >= ?",
+          since24h,
+        ),
+        new7d: count(
+          "SELECT COUNT(*) value FROM accounts WHERE created_at >= ?",
+          since7d,
+        ),
+        new30d: count(
+          "SELECT COUNT(*) value FROM accounts WHERE created_at >= ?",
+          since30d,
+        ),
+      },
+      devices: {
+        total: count("SELECT COUNT(*) value FROM devices"),
+        paired: count(
+          "SELECT COUNT(*) value FROM devices WHERE account_id IS NOT NULL",
+        ),
+        online: count(
+          "SELECT COUNT(*) value FROM devices WHERE last_seen_at IS NOT NULL",
+        ),
+        dshOnline: count(
+          "SELECT COUNT(*) value FROM devices WHERE dsh_status = 'online'",
+        ),
+      },
+      sessions: {
+        active: count(
+          "SELECT COUNT(*) value FROM access_sessions WHERE ended_reason IS NULL AND expires_at > ?",
+          now,
+        ),
+        last24h: count(
+          "SELECT COUNT(*) value FROM access_sessions WHERE started_at >= ?",
+          since24h,
+        ),
+        last7d: count(
+          "SELECT COUNT(*) value FROM access_sessions WHERE started_at >= ?",
+          since7d,
+        ),
+        last30d: count(
+          "SELECT COUNT(*) value FROM access_sessions WHERE started_at >= ?",
+          since30d,
+        ),
+        activeUsers30d: count(
+          "SELECT COUNT(DISTINCT account_id) value FROM access_sessions WHERE started_at >= ?",
+          since30d,
+        ),
+      },
+      daily,
+      recentSessions: recent.map(({ expiresAt, endedReason, ...row }) => ({
+        ...row,
+        status: endedReason ? "ended" : expiresAt <= now ? "expired" : "active",
+      })),
+    };
   }
   addEvent(deviceId: string, kind: string) {
     this.db

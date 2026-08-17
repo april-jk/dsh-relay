@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f4f6f3" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#151917" media="(prefers-color-scheme: dark)">
+    <title>DSH Remote</title>
+    <link rel="stylesheet" href="/app/app.css">
+    <script src="/app/crypto.js" defer></script>
+    <script src="/app/key-store.js" defer></script>
+    <script src="/app/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/app/" aria-label="DSH Remote 首页">
+        <span class="brand-mark" aria-hidden="true">D</span>
+        <span>DSH Remote</span>
+      </a>
+      <button id="logout" class="quiet-button hidden" type="button">退出</button>
+    </header>
+
+    <main>
+      <section id="loading" class="state-view" aria-live="polite">
+        <div class="skeleton title-skeleton"></div>
+        <div class="skeleton line-skeleton"></div>
+        <div class="skeleton panel-skeleton"></div>
+      </section>
+
+      <section id="auth" class="auth-layout hidden">
+        <div class="auth-copy">
+          <h1>在 Safari 中打开你的 DSH</h1>
+          <p>不安装 App。登录后选择电脑，所有 DSH 内容在浏览器与电脑之间端到端加密。</p>
+        </div>
+        <form id="auth-form" class="form-panel">
+          <div class="segmented" role="tablist" aria-label="账号操作">
+            <button id="login-mode" class="active" type="button" role="tab" aria-selected="true">登录</button>
+            <button id="register-mode" type="button" role="tab" aria-selected="false">注册</button>
+          </div>
+          <label for="email">邮箱</label>
+          <input id="email" name="email" type="email" autocomplete="email" required>
+          <label for="password">密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" minlength="8" required>
+          <p id="auth-error" class="form-error" role="alert"></p>
+          <button id="auth-submit" class="primary-button" type="submit">登录</button>
+        </form>
+      </section>
+
+      <section id="dashboard" class="dashboard hidden">
+        <div class="page-heading">
+          <div>
+            <h1>你的电脑</h1>
+            <p>选择在线设备，直接进入原有 DSH 界面。</p>
+          </div>
+          <button id="show-pair" class="secondary-button" type="button">添加电脑</button>
+        </div>
+        <div id="pair-notice" class="notice hidden" role="status"></div>
+        <div id="device-list" class="device-list" aria-live="polite"></div>
+        <div id="empty-devices" class="empty-state hidden">
+          <h2>还没有已绑定的电脑</h2>
+          <p>在电脑上的 DSH 远程访问设置中生成配对链接，然后在这里打开。</p>
+          <button class="secondary-button pair-trigger" type="button">输入配对链接</button>
+        </div>
+      </section>
+
+      <dialog id="pair-dialog">
+        <form id="pair-form" method="dialog">
+          <div class="dialog-heading">
+            <h2>添加电脑</h2>
+            <button id="close-pair" class="icon-button" type="button" aria-label="关闭">×</button>
+          </div>
+          <p>使用 iPhone 相机扫描电脑上的二维码会自动打开此页。也可以粘贴完整配对链接。</p>
+          <label for="pair-link">配对链接</label>
+          <textarea id="pair-link" rows="4" autocomplete="off" spellcheck="false" required></textarea>
+          <p id="pair-error" class="form-error" role="alert"></p>
+          <button class="primary-button" type="submit">绑定电脑</button>
+        </form>
+      </dialog>
+    </main>
+  </body>
+</html>

@@ -8,8 +8,11 @@ import { join } from "node:path";
 import { WebSocket } from "ws";
 import { Store } from "../src/store.js";
 
-async function rejectedProductionStartup(jwtSecret?: string) {
-  const environment = { ...process.env, NODE_ENV: "production" };
+async function rejectedProductionStartup(
+  jwtSecret?: string,
+  extra: Record<string, string> = {},
+) {
+  const environment = { ...process.env, NODE_ENV: "production", ...extra };
   if (jwtSecret === undefined) delete environment.JWT_SECRET;
   else environment.JWT_SECRET = jwtSecret;
   const child = spawn(process.execPath, ["dist/server.js"], {
@@ -33,6 +36,21 @@ test("production startup rejects missing, short, and default JWT secrets", async
     const result = await rejectedProductionStartup(candidate);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /JWT_SECRET/);
+  }
+});
+
+test("production rejects partial or weak admin credentials", async () => {
+  for (const extra of [
+    { ADMIN_USERNAME: "relay-admin", ADMIN_PASSWORD: "" },
+    { ADMIN_USERNAME: "", ADMIN_PASSWORD: "short-password" },
+    { ADMIN_USERNAME: "relay-admin", ADMIN_PASSWORD: "too-short" },
+  ]) {
+    const result = await rejectedProductionStartup(
+      "secure-default-test-secret-value",
+      extra,
+    );
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /ADMIN_USERNAME|ADMIN_PASSWORD/);
   }
 });
 
