@@ -34,11 +34,11 @@ npm run build
 npm start
 ```
 
-The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persistent location in production. The Relay expects HTTPS/WSS in any public deployment and routes 0.1.5 sealed tunnel frames without receiving DSH plaintext.
+The default listener is `http://127.0.0.1:8787`. Set `DATABASE_PATH` to a persistent location in production. The Relay expects HTTPS/WSS in any public deployment and routes 0.1.6 sealed tunnel frames without receiving DSH plaintext.
 
 ## Releases
 
-Every pull request and branch push installs locked dependencies, builds, tests, and audits the Relay in GitHub Actions. A tag that exactly matches the version in both `package.json` and `package-lock.json` (for example, `v0.1.5`) creates a GitHub Release automatically.
+Every pull request and branch push installs locked dependencies, builds, tests, and audits the Relay in GitHub Actions. A tag that exactly matches the version in both `package.json` and `package-lock.json` (for example, `v0.1.6`) creates a GitHub Release automatically.
 
 Each release contains `.tar.gz` and `.zip` archives with the compiled `dist/` output, deployment files, and production dependency manifests, plus `SHA256SUMS`. The same workflow publishes `ghcr.io/april-jk/dsh-relay:<version>` and `:latest`. Only the highest stable SemVer tag may update `latest`; existing version images and release assets cannot be replaced with different content. After extracting an archive, run `npm ci --omit=dev` before `npm start`; native dependencies are installed for the target platform instead of being bundled from CI.
 

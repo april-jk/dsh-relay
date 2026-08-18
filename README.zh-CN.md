@@ -6,13 +6,13 @@
 
 用于 DSH 手机遥控 MVP 的云端 Relay。
 
-公共生产地址：`https://relay.dshmobile.online`。0.1.5 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
+公共生产地址：`https://relay.dshmobile.online`。0.1.6 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
 
 ## 浏览器访问
 
 直接访问 Relay 根地址会跳转到 `/app/`。该页面支持账号登录、注册、配对、设备列表，以及在 Safari 中打开原有 DSH Web UI。浏览器使用 Web Crypto 实现 `sealed-tunnel-v1`，密钥只保存在本机 IndexedDB 与当前 Service Worker 内存中。Relay 仍然只能看到账号与设备关系、连接时间、密文长度和流量时序。
 
-Companion 生成的二维码是 `https://<relay>/app/#/pair?code=...&key=...`。iPhone 相机可以直接打开；`#` 后的配对码与密钥不会发送到 Relay。旧版 JSON 二维码仍可由移动 App 解析，但新 Companion 默认生成浏览器链接。
+Companion 生成的二维码是 `https://<relay>/app/#/pair?code=...&key=...`。iPhone 相机可以直接打开；`#` 后的配对码与密钥不会发送到 Relay。已配对电脑还可以在 DSH 设置页生成浏览器访问码 `#/web-pair?device=...&key=...`，手机和多个浏览器可以分别保存同一台电脑的 E2EE 密钥并同时使用，不会互相解绑。旧版 JSON 二维码仍可由移动 App 解析，但新 Companion 默认生成浏览器链接。
 
 远程页面依赖 HTTPS、Service Worker、Web Crypto 与 WebSocket。生产部署必须设置 `PUBLIC_RELAY_URL=https://实际域名`，并保持 `ALLOW_LEGACY_WEB_PROXY=0`。
 
@@ -40,7 +40,7 @@ npm start
 
 ## 版本发布
 
-每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.5`）后，GitHub Release 会自动创建。
+每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.6`）后，GitHub Release 会自动创建。
 
 每个 Release 提供包含预编译 `dist/`、部署文件和生产依赖清单的 `.tar.gz` 与 `.zip`，并附带 `SHA256SUMS`。同一工作流还会发布 `ghcr.io/april-jk/dsh-relay:<version>` 与 `:latest`。只有最高的稳定 SemVer 标签可以更新 `latest`；已有版本镜像和 Release 资产不能被不同内容覆盖。解压后先运行 `npm ci --omit=dev`，再运行 `npm start`；原生依赖会针对目标平台安装，而不是打包 CI 环境中的二进制。
 
