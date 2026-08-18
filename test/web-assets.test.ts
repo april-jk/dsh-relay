@@ -48,6 +48,10 @@ test("container and release archives include browser assets", () => {
   assert.match(browserApp, /enrollBrowserPair/);
   assert.match(browserApp, /parsePairInput/);
   assert.match(browserApp, /parsed\.kind === "browser"/);
+  const serviceWorker = readFileSync("web/app/sw.js", "utf8");
+  assert.match(serviceWorker, /resumeTunnel/);
+  assert.match(serviceWorker, /freshTicket/);
+  assert.match(serviceWorker, /tunnel-sessions/);
   const enrollmentStart = browserApp.indexOf(
     "async function enrollBrowserPair",
   );

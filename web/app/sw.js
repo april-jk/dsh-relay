@@ -8,6 +8,46 @@ const remoteClients = new Map();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+const sessionDatabase = new Promise((resolve, reject) => {
+  const request = indexedDB.open("dsh-remote-web", 2);
+  request.onupgradeneeded = () => {
+    if (!request.result.objectStoreNames.contains("tunnel-sessions"))
+      request.result.createObjectStore("tunnel-sessions", { keyPath: "deviceId" });
+  };
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+
+function sessionTransaction(mode, action) {
+  return sessionDatabase.then((db) => new Promise((resolve, reject) => {
+    const transaction = db.transaction("tunnel-sessions", mode);
+    const request = action(transaction.objectStore("tunnel-sessions"));
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  }));
+}
+
+function readSession(deviceId) {
+  return sessionTransaction("readonly", (store) => store.get(deviceId));
+}
+
+function writeSession(session) {
+  return sessionTransaction("readwrite", (store) => store.put(session));
+}
+
+function readMasterKey(deviceId) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("dsh-remote-web", 1);
+    request.onsuccess = () => {
+      const transaction = request.result.transaction("device-keys", "readonly");
+      const keyRequest = transaction.objectStore("device-keys").get(deviceId);
+      keyRequest.onsuccess = () => resolve(keyRequest.result || null);
+      keyRequest.onerror = () => reject(keyRequest.error);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
 function id(prefix) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
@@ -333,6 +373,47 @@ class Tunnel {
   }
 }
 
+async function freshTicket(deviceId) {
+  const response = await fetch("/web-ticket", {
+    method: "POST",
+    credentials: "include",
+    cache: "no-store",
+    headers: { "content-type": "application/json", "x-dsh-sw-resume": "1" },
+    body: JSON.stringify({ deviceId }),
+  });
+  if (!response.ok) throw new Error("web_ticket_failed");
+  return response.json();
+}
+
+async function resumeTunnel(deviceId) {
+  const session = await readSession(deviceId);
+  const masterKey = await readMasterKey(deviceId);
+  if (!session || !masterKey) return null;
+  const connect = async (ticketData) => {
+    const options = {
+      deviceId,
+      masterKey,
+      ticket: ticketData.ticket,
+      accessSessionId: ticketData.accessSessionId,
+      tunnelUrl: ticketData.tunnelUrl,
+    };
+    const tunnel = new Tunnel(options);
+    await tunnel.connect();
+    tunnels.set(deviceId, tunnel);
+    await writeSession({ ...session, ...options, masterKey: undefined });
+    return tunnel;
+  };
+  try {
+    return await connect(session);
+  } catch {
+    try {
+      return await connect(await freshTicket(deviceId));
+    } catch {
+      return null;
+    }
+  }
+}
+
 self.addEventListener("install", (event) => event.waitUntil(self.skipWaiting()));
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
@@ -346,6 +427,12 @@ self.addEventListener("message", (event) => {
         const tunnel = new Tunnel(message);
         await tunnel.connect();
         tunnels.set(message.deviceId, tunnel);
+        await writeSession({
+          deviceId: message.deviceId,
+          ticket: message.ticket,
+          accessSessionId: message.accessSessionId,
+          tunnelUrl: message.tunnelUrl,
+        });
         respond({ ok: true });
       } catch (error) {
         respond({ ok: false, error: error instanceof Error ? error.message : "无法建立加密隧道" });
@@ -371,6 +458,7 @@ self.addEventListener("message", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  if (event.request.headers.get("x-dsh-sw-resume") === "1") return;
   const launch = /^\/remote\/([^/]+)(\/.*)?$/.exec(url.pathname);
   let deviceId = event.clientId ? remoteClients.get(event.clientId) : undefined;
   if (launch) {
@@ -379,15 +467,14 @@ self.addEventListener("fetch", (event) => {
     if (resultingId) remoteClients.set(resultingId, deviceId);
   }
   if (!deviceId) return;
-  const tunnel = tunnels.get(deviceId);
-  if (!tunnel) {
-    if (event.clientId) remoteClients.delete(event.clientId);
-    if (event.resultingClientId) remoteClients.delete(event.resultingClientId);
-    event.respondWith(fetch("/remote/unavailable.html"));
-    return;
-  }
   const path = launch ? `${launch[2] || "/"}${url.search}` : `${url.pathname}${url.search}`;
-  event.respondWith(
-    tunnel.request(path, event.request).catch(() => new Response("Secure tunnel failed", { status: 502 })),
-  );
+  event.respondWith((async () => {
+    const tunnel = tunnels.get(deviceId) || await resumeTunnel(deviceId);
+    if (!tunnel) {
+      if (event.clientId) remoteClients.delete(event.clientId);
+      if (event.resultingClientId) remoteClients.delete(event.resultingClientId);
+      return fetch("/remote/unavailable.html");
+    }
+    return tunnel.request(path, event.request).catch(() => new Response("Secure tunnel failed", { status: 502 }));
+  })());
 });
