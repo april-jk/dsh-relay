@@ -66,7 +66,7 @@ test("container and release archives include browser assets", () => {
   assert.ok(clearFragment > 0 && clearFragment < authorizeDevice);
   assert.match(
     readFileSync("web/app/index.html", "utf8"),
-    /app\.js\?v=0\.1\.6/,
+    /app\.js\?v=0\.1\.8/,
   );
   for (const file of [
     "web/app/index.html",

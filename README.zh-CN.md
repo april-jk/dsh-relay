@@ -6,7 +6,7 @@
 
 用于 DSH 手机遥控 MVP 的云端 Relay。
 
-公共生产地址：`https://relay.dshmobile.online`。0.1.7 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
+公共生产地址：`https://relay.dshmobile.online`。0.1.8 默认只路由端到端加密的 sealed tunnel，不接收 DSH 业务明文。
 
 ## 浏览器访问
 
@@ -40,7 +40,7 @@ npm start
 
 ## 版本发布
 
-每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.7`）后，GitHub Release 会自动创建。
+每个 Pull Request 和分支 Push 都会由 GitHub Actions 使用 lockfile 安装依赖，并执行构建、测试和生产依赖审计。推送与 `package.json`、`package-lock.json` 中版本完全一致的标签（例如 `v0.1.8`）后，GitHub Release 会自动创建。
 
 每个 Release 提供包含预编译 `dist/`、部署文件和生产依赖清单的 `.tar.gz` 与 `.zip`，并附带 `SHA256SUMS`。同一工作流还会发布 `ghcr.io/april-jk/dsh-relay:<version>` 与 `:latest`。只有最高的稳定 SemVer 标签可以更新 `latest`；已有版本镜像和 Release 资产不能被不同内容覆盖。解压后先运行 `npm ci --omit=dev`，再运行 `npm start`；原生依赖会针对目标平台安装，而不是打包 CI 环境中的二进制。
 

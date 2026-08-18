@@ -376,7 +376,7 @@ async function waitForDevice(deviceId) {
 
 async function ensureWorker() {
   if (!("serviceWorker" in navigator) || !crypto.subtle) throw new Error("当前浏览器不支持安全远程访问，请升级 Safari。");
-  await navigator.serviceWorker.register("/app/sw.js", { scope: "/" });
+  await navigator.serviceWorker.register("/app/sw.js?v=0.1.8", { scope: "/" });
   await navigator.serviceWorker.ready;
   if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
   return new Promise((resolve, reject) => {
