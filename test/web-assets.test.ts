@@ -45,6 +45,9 @@ test("container and release archives include browser assets", () => {
     "web/app/index.html",
     "web/app/app.js",
     "web/app/sw.js",
+    "web/app/qr-scanner.umd.min.js",
+    "web/app/qr-scanner-worker.min.js",
+    "web/app/qr-scanner.LICENSE",
     "web/admin/index.html",
     "web/admin/admin.js",
   ]) {

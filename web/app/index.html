@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/app/app.css">
     <script src="/app/crypto.js" defer></script>
     <script src="/app/key-store.js" defer></script>
+    <script src="/app/qr-scanner.umd.min.js" defer></script>
     <script src="/app/app.js" defer></script>
   </head>
   <body data-view="loading">
@@ -83,7 +84,7 @@
           <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4M17 8v5M14.5 10.5h5"/></svg>
           <h2>还没有绑定电脑</h2>
           <p>在电脑终端生成配对二维码，再用 iPhone 相机扫描。</p>
-          <button class="primary-button pair-trigger" type="button">输入配对链接</button>
+          <button class="primary-button pair-trigger" type="button">扫描二维码</button>
         </div>
       </section>
 
@@ -101,14 +102,33 @@
           <h2>绑定电脑</h2>
           <button id="close-pair" class="icon-button" type="button" aria-label="关闭">×</button>
         </div>
-        <div class="pair-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2M20 14v2M14 18h2v2M18 18h2v2"/></svg>
+        <div class="pair-method" role="tablist" aria-label="绑定方式">
+          <button id="scan-mode" class="active" type="button" role="tab" aria-selected="true">扫描二维码</button>
+          <button id="manual-mode" type="button" role="tab" aria-selected="false">输入链接</button>
         </div>
-        <p>用 iPhone 相机扫描电脑终端中的二维码会自动完成配对，也可以粘贴完整配对链接。</p>
-        <label for="pair-link">配对链接</label>
-        <textarea id="pair-link" rows="4" autocomplete="off" spellcheck="false" placeholder="https://relay.dshmobile.online/app/#/pair?…" required></textarea>
+        <div id="scan-panel" class="scan-panel">
+          <div class="camera-frame">
+            <video id="pair-camera" autoplay muted playsinline></video>
+            <span class="camera-corner top-left" aria-hidden="true"></span>
+            <span class="camera-corner top-right" aria-hidden="true"></span>
+            <span class="camera-corner bottom-left" aria-hidden="true"></span>
+            <span class="camera-corner bottom-right" aria-hidden="true"></span>
+            <span id="camera-loading" class="camera-loading"><span class="spinner" aria-hidden="true"></span></span>
+          </div>
+          <p id="camera-status" class="camera-status">正在请求摄像头权限…</p>
+        </div>
+        <div id="manual-panel" class="manual-panel hidden">
+          <div class="pair-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2M20 14v2M14 18h2v2M18 18h2v2"/></svg>
+          </div>
+          <p>也可以粘贴电脑终端生成的完整配对链接。</p>
+        </div>
+        <div id="pair-link-field" class="pair-link-field hidden">
+          <label for="pair-link">配对链接</label>
+          <textarea id="pair-link" rows="4" autocomplete="off" spellcheck="false" placeholder="https://relay.dshmobile.online/app/#/pair?…"></textarea>
+        </div>
         <p id="pair-error" class="form-error" role="alert"></p>
-        <button class="primary-button" type="submit">绑定电脑</button>
+        <button id="manual-submit" class="primary-button hidden" type="submit">绑定电脑</button>
       </form>
     </dialog>
 

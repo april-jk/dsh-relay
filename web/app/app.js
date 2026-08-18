@@ -6,7 +6,9 @@ const elements = Object.fromEntries(
     "auth-form", "login-mode", "register-mode", "auth-submit", "auth-error",
     "auth-title", "auth-description", "email", "password", "toggle-password",
     "show-pair", "pair-dialog", "pair-form", "close-pair", "pair-link",
-    "pair-error", "pair-notice", "device-list", "empty-devices",
+    "pair-error", "pair-notice", "device-list", "empty-devices", "scan-mode",
+    "manual-mode", "scan-panel", "manual-panel", "pair-camera", "camera-loading",
+    "camera-status", "pair-link-field", "manual-submit",
     "show-settings", "settings-dialog", "close-settings", "settings-email",
     "settings-relay", "relay-host", "connecting-device", "cancel-connecting",
   ].map((id) => [id, document.getElementById(id)]),
@@ -16,6 +18,9 @@ let authMode = "login";
 let pendingPair = parsePairValue(location.href);
 let signedInEmail = "";
 let connectionCancelled = false;
+let pairMode = "scan";
+let pairScanner = null;
+let pairSubmitting = false;
 
 const computerIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
 
@@ -215,6 +220,93 @@ function showNotice(error) {
   elements["pair-notice"].classList.remove("hidden");
 }
 
+function setCameraStatus(message, error = false) {
+  elements["camera-status"].textContent = message;
+  elements["camera-status"].classList.toggle("error", error);
+}
+
+function stopPairScanner() {
+  pairScanner?.stop();
+  elements["camera-loading"].classList.add("hidden");
+}
+
+async function startPairScanner() {
+  if (pairMode !== "scan" || !elements["pair-dialog"].open) return;
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    setCameraStatus("请使用 HTTPS 访问，当前浏览器无法打开摄像头。", true);
+    return;
+  }
+  if (!window.QrScanner) {
+    setCameraStatus("扫码组件尚未加载，请刷新页面后重试。", true);
+    return;
+  }
+  elements["camera-loading"].classList.remove("hidden");
+  setCameraStatus("正在请求摄像头权限…");
+  try {
+    if (!pairScanner) {
+      QrScanner.WORKER_PATH = "/app/qr-scanner-worker.min.js";
+      pairScanner = new QrScanner(
+        elements["pair-camera"],
+        (result) => handleScannedPair(result?.data || result),
+        { preferredCamera: "environment", highlightScanRegion: false, highlightCodeOutline: false },
+      );
+    }
+    const hasCamera = await QrScanner.hasCamera();
+    if (!hasCamera) throw new Error("未检测到摄像头。");
+    await pairScanner.start();
+    elements["camera-loading"].classList.add("hidden");
+    setCameraStatus("将电脑终端中的二维码放入框内。摄像头内容只在本机处理。");
+  } catch (error) {
+    elements["camera-loading"].classList.add("hidden");
+    const message = error?.name === "NotAllowedError"
+      ? "请在浏览器设置中允许摄像头权限，然后重试。"
+      : error?.message || "无法打开摄像头，请改用输入链接。";
+    setCameraStatus(message, true);
+  }
+}
+
+function setPairMode(mode) {
+  pairMode = mode;
+  const scan = mode === "scan";
+  elements["scan-mode"].classList.toggle("active", scan);
+  elements["manual-mode"].classList.toggle("active", !scan);
+  elements["scan-mode"].setAttribute("aria-selected", String(scan));
+  elements["manual-mode"].setAttribute("aria-selected", String(!scan));
+  elements["scan-panel"].classList.toggle("hidden", !scan);
+  elements["manual-panel"].classList.toggle("hidden", scan);
+  elements["pair-link-field"].classList.toggle("hidden", scan);
+  elements["manual-submit"].classList.toggle("hidden", scan);
+  elements["pair-link"].required = !scan;
+  if (scan) startPairScanner();
+  else stopPairScanner();
+}
+
+async function submitPairValue(raw) {
+  const pair = parsePairValue(raw);
+  if (!pair) throw new Error("二维码不是有效的 DSH 加密配对码。");
+  pairSubmitting = true;
+  elements["pair-error"].textContent = "";
+  stopPairScanner();
+  try {
+    const deviceId = await claimPair(pair);
+    elements["pair-dialog"].close();
+    elements["pair-link"].value = "";
+    await waitForDevice(deviceId);
+  } finally {
+    pairSubmitting = false;
+  }
+}
+
+function handleScannedPair(raw) {
+  if (pairSubmitting || !raw) return;
+  submitPairValue(raw).catch((error) => {
+    pairSubmitting = false;
+    elements["pair-error"].textContent = error.message;
+    setCameraStatus("没有识别到有效的 DSH 配对二维码，请重新对准。", true);
+    if (elements["pair-dialog"].open) startPairScanner();
+  });
+}
+
 async function waitForDevice(deviceId) {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const data = await api("/devices");
@@ -336,9 +428,23 @@ elements.logout.addEventListener("click", async () => {
   signedInEmail = "";
   showOnly("auth");
 });
-elements["show-pair"].addEventListener("click", () => elements["pair-dialog"].showModal());
-for (const trigger of document.querySelectorAll(".pair-trigger")) trigger.addEventListener("click", () => elements["pair-dialog"].showModal());
-elements["close-pair"].addEventListener("click", () => elements["pair-dialog"].close());
+function openPairDialog() {
+  elements["pair-error"].textContent = "";
+  elements["pair-dialog"].showModal();
+  setPairMode("scan");
+}
+
+function closePairDialog() {
+  stopPairScanner();
+  elements["pair-dialog"].close();
+}
+
+elements["show-pair"].addEventListener("click", openPairDialog);
+for (const trigger of document.querySelectorAll(".pair-trigger")) trigger.addEventListener("click", openPairDialog);
+elements["close-pair"].addEventListener("click", closePairDialog);
+elements["pair-dialog"].addEventListener("close", stopPairScanner);
+elements["scan-mode"].addEventListener("click", () => setPairMode("scan"));
+elements["manual-mode"].addEventListener("click", () => setPairMode("manual"));
 elements["show-settings"].addEventListener("click", () => elements["settings-dialog"].showModal());
 elements["close-settings"].addEventListener("click", () => elements["settings-dialog"].close());
 elements["cancel-connecting"].addEventListener("click", () => {
@@ -350,17 +456,10 @@ document.addEventListener("click", (event) => {
 });
 elements["pair-form"].addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (pairMode !== "manual" || pairSubmitting) return;
   elements["pair-error"].textContent = "";
-  const pair = parsePairValue(elements["pair-link"].value);
-  if (!pair) {
-    elements["pair-error"].textContent = "请输入电脑生成的完整配对链接。";
-    return;
-  }
   try {
-    const deviceId = await claimPair(pair);
-    elements["pair-dialog"].close();
-    elements["pair-link"].value = "";
-    await waitForDevice(deviceId);
+    await submitPairValue(elements["pair-link"].value);
   } catch (error) {
     elements["pair-error"].textContent = error.message;
   }

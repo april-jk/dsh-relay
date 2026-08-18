@@ -9,6 +9,7 @@ const types: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
   ".svg": "image/svg+xml",
 };
 
@@ -18,6 +19,8 @@ const publicFiles = new Map<string, string>([
   ["/app/app.js", "app/app.js"],
   ["/app/crypto.js", "app/crypto.js"],
   ["/app/key-store.js", "app/key-store.js"],
+  ["/app/qr-scanner.umd.min.js", "app/qr-scanner.umd.min.js"],
+  ["/app/qr-scanner-worker.min.js", "app/qr-scanner-worker.min.js"],
   ["/app/sw.js", "app/sw.js"],
   ["/admin/", "admin/index.html"],
   ["/admin/admin.css", "admin/admin.css"],
@@ -45,7 +48,7 @@ function securityHeaders(pathname: string): Record<string, string> {
       "frame-ancestors 'self'",
     ].join("; "),
     "cross-origin-opener-policy": "same-origin",
-    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "permissions-policy": "camera=(self), microphone=(), geolocation=()",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "x-frame-options": "SAMEORIGIN",
