@@ -46,6 +46,8 @@ test("container and release archives include browser assets", () => {
   assert.match(browserApp, /权限请求超时/);
   assert.match(browserApp, /parseBrowserPairValue/);
   assert.match(browserApp, /enrollBrowserPair/);
+  assert.match(browserApp, /parsePairInput/);
+  assert.match(browserApp, /parsed\.kind === "browser"/);
   const enrollmentStart = browserApp.indexOf(
     "async function enrollBrowserPair",
   );
@@ -60,7 +62,7 @@ test("container and release archives include browser assets", () => {
   assert.ok(clearFragment > 0 && clearFragment < authorizeDevice);
   assert.match(
     readFileSync("web/app/index.html", "utf8"),
-    /app\.js\?v=0\.1\.5/,
+    /app\.js\?v=0\.1\.6/,
   );
   for (const file of [
     "web/app/index.html",

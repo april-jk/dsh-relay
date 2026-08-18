@@ -76,6 +76,14 @@ function parsePairValue(value) {
   }
 }
 
+function parsePairInput(value) {
+  const browser = parseBrowserPairValue(value);
+  return browser ? { kind: "browser", ...browser } : (() => {
+    const pair = parsePairValue(value);
+    return pair ? { kind: "computer", ...pair } : null;
+  })();
+}
+
 function validatePair(code, key, relay) {
   if (!/^\d{6}$/.test(String(code || ""))) throw new Error("invalid code");
   DshCrypto.fromBase64Url(key, 32);
@@ -124,6 +132,7 @@ async function enrollBrowserPair(pair) {
   pendingBrowserPair = null;
   elements["pair-notice"].textContent = `已为“${device.name}”启用浏览器访问。现在可以从网页端打开。`;
   elements["pair-notice"].classList.remove("hidden");
+  return pair.deviceId;
 }
 
 function setAuthMode(mode) {
@@ -328,16 +337,19 @@ function setPairMode(mode) {
 }
 
 async function submitPairValue(raw) {
-  const pair = parsePairValue(raw);
-  if (!pair) throw new Error("二维码不是有效的 DSH 加密配对码。");
+  const parsed = parsePairInput(raw);
+  if (!parsed) throw new Error("二维码不是有效的 DSH 加密配对码或浏览器访问码。");
   pairSubmitting = true;
   elements["pair-error"].textContent = "";
   stopPairScanner();
   try {
-    const deviceId = await claimPair(pair);
+    const deviceId = parsed.kind === "browser"
+      ? await enrollBrowserPair(parsed)
+      : await claimPair(parsed);
     elements["pair-dialog"].close();
     elements["pair-link"].value = "";
-    await waitForDevice(deviceId);
+    if (parsed.kind === "computer") await waitForDevice(deviceId);
+    else await renderDevices();
   } finally {
     pairSubmitting = false;
   }
