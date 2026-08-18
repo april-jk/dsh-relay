@@ -391,7 +391,6 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
     sealedResponse.payload.ciphertextB64,
     "cmVsYXktY2Fubm90LWRlY3J5cHQ",
   );
-  secureClient.close();
   await assert.rejects(
     open(`${wsBase}/client-tunnel`, {
       headers: { authorization: `WebTicket ${secureTicket.data.ticket}` },
@@ -415,6 +414,50 @@ test("pairs a device and tunnels HTTP and WebSocket traffic", async (t) => {
     `dsh-ticket.${encodedTicket}`,
   ]);
   assert.equal(protocolClient.protocol, "dsh-e2ee-v1");
+  protocolClient.send(
+    JSON.stringify({
+      v: 1,
+      type: "client_hello",
+      id: "browser-client-hello",
+      ts: 0,
+      payload: {
+        accessSessionId: browserTicket.accessSessionId,
+        clientRandomB64: "browser-random",
+        clientProofB64: "browser-proof",
+      },
+    }),
+  );
+  assert.equal((await next(protocolClient)).type, "server_hello");
+  protocolClient.send(
+    JSON.stringify({
+      v: 1,
+      type: "sealed",
+      id: "browser-sealed-request",
+      ts: 0,
+      payload: {
+        accessSessionId: browserTicket.accessSessionId,
+        seq: "0",
+        ciphertextB64: "YnJvd3Nlci1vcGFxdWU",
+      },
+    }),
+  );
+  assert.equal((await next(protocolClient)).type, "sealed");
+
+  secureClient.send(
+    JSON.stringify({
+      v: 1,
+      type: "sealed",
+      id: "mobile-sealed-request",
+      ts: 0,
+      payload: {
+        accessSessionId: secureTicket.data.accessSessionId,
+        seq: "1",
+        ciphertextB64: "bW9iaWxlLW9wYXF1ZQ",
+      },
+    }),
+  );
+  assert.equal((await next(secureClient)).type, "sealed");
+  secureClient.close();
   protocolClient.close();
 
   const adminLogin = await fetch(`${base}/admin/api/login`, {

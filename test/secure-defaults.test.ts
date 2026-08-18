@@ -98,7 +98,7 @@ test("fails closed when legacy proxy or a web ticket is unavailable", async (t) 
   assert.equal(version.status, 200);
   assert.deepEqual(await version.json(), {
     platform: "android",
-    latestVersion: "0.1.4",
+    latestVersion: "0.1.5",
     minimumVersion: "0.1.3",
     downloadUrl: null,
     releaseNotes: null,

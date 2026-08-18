@@ -114,11 +114,13 @@ async function claimPair(pair) {
 }
 
 async function enrollBrowserPair(pair) {
+  // Keep the key only in memory while authorization is checked. It must not
+  // remain in browser history when enrollment fails or targets another account.
+  history.replaceState(null, "", "/app/");
   const data = await api("/devices");
   const device = data.devices.find((item) => item.id === pair.deviceId);
   if (!device) throw new Error("这台电脑不属于当前账号，请使用绑定它的账号登录。");
   await DshKeyStore.set(pair.deviceId, pair.key);
-  history.replaceState(null, "", "/app/");
   pendingBrowserPair = null;
   elements["pair-notice"].textContent = `已为“${device.name}”启用浏览器访问。现在可以从网页端打开。`;
   elements["pair-notice"].classList.remove("hidden");

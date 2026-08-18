@@ -544,7 +544,7 @@ async function api(req: IncomingMessage, res: ServerResponse) {
       200,
       {
         platform,
-        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.4",
+        latestVersion: configured(`APP_${prefix}_LATEST_VERSION`) ?? "0.1.5",
         minimumVersion:
           configured(`APP_${prefix}_MINIMUM_VERSION`) ?? "0.1.3",
         downloadUrl: configured(`APP_${prefix}_DOWNLOAD_URL`),
