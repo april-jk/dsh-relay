@@ -39,8 +39,11 @@ test("browser E2EE reproduces the shared sealed-frame vector", () => {
 test("container and release archives include browser assets", () => {
   const dockerfile = readFileSync("Dockerfile", "utf8");
   const release = readFileSync(".github/workflows/release.yml", "utf8");
+  const browserApp = readFileSync("web/app/app.js", "utf8");
   assert.match(dockerfile, /COPY --from=build \/app\/web \.\/web/);
   assert.match(release, /cp -R web/);
+  assert.doesNotMatch(browserApp, /hasCamera\(/);
+  assert.match(browserApp, /权限请求超时/);
   for (const file of [
     "web/app/index.html",
     "web/app/app.js",

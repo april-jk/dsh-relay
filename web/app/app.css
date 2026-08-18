@@ -141,6 +141,7 @@ dialog form { display: grid; padding: 22px; }
 .camera-corner.bottom-right { right: 16%; bottom: 16%; border-width: 0 3px 3px 0; border-radius: 0 0 8px; }
 .camera-status { min-height: 42px; margin: 12px 0 0; text-align: center; font-size: 14px; }
 .camera-status.error { color: var(--danger); }
+.camera-retry { display: block; min-height: 42px; margin: -2px auto 0; }
 .manual-panel p { margin: 4px 0 20px; text-align: center; font-size: 14px; }
 .pair-link-field textarea { resize: vertical; font-size: 14px; line-height: 1.45; }
 #pair-form .primary-button { margin-top: 3px; }
@@ -167,6 +168,11 @@ dialog form { display: grid; padding: 22px; }
   .brand-tag { margin-left: 5px; padding-inline: 5px; }
   .auth-layout { padding-inline: 24px; }
   dialog { width: calc(100% - 20px); }
+}
+
+@media (max-width: 600px) {
+  #pair-dialog { width: 100%; max-width: none; max-height: none; height: 100dvh; border: 0; border-radius: 0; }
+  #pair-dialog form { min-height: 100%; padding: max(20px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

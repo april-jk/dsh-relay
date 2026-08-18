@@ -8,7 +8,7 @@ const elements = Object.fromEntries(
     "show-pair", "pair-dialog", "pair-form", "close-pair", "pair-link",
     "pair-error", "pair-notice", "device-list", "empty-devices", "scan-mode",
     "manual-mode", "scan-panel", "manual-panel", "pair-camera", "camera-loading",
-    "camera-status", "pair-link-field", "manual-submit",
+    "camera-status", "camera-retry", "pair-link-field", "manual-submit",
     "show-settings", "settings-dialog", "close-settings", "settings-email",
     "settings-relay", "relay-host", "connecting-device", "cancel-connecting",
   ].map((id) => [id, document.getElementById(id)]),
@@ -223,6 +223,7 @@ function showNotice(error) {
 function setCameraStatus(message, error = false) {
   elements["camera-status"].textContent = message;
   elements["camera-status"].classList.toggle("error", error);
+  elements["camera-retry"].classList.toggle("hidden", !error);
 }
 
 function stopPairScanner() {
@@ -251,12 +252,25 @@ async function startPairScanner() {
         { preferredCamera: "environment", highlightScanRegion: false, highlightCodeOutline: false },
       );
     }
-    const hasCamera = await QrScanner.hasCamera();
-    if (!hasCamera) throw new Error("未检测到摄像头。");
-    await pairScanner.start();
+    // Do not run the library's separate camera availability probe here. It opens a separate permission/
+    // enumeration request and can remain pending on Android until the browser
+    // finishes its permission UI. Starting the scanner uses the same stream and
+    // gives us a bounded failure path.
+    let timeoutId;
+    try {
+      await Promise.race([
+        pairScanner.start(),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error("摄像头权限请求超时，请重试或输入配对链接。")), 12_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
     elements["camera-loading"].classList.add("hidden");
     setCameraStatus("将电脑终端中的二维码放入框内。摄像头内容只在本机处理。");
   } catch (error) {
+    stopPairScanner();
     elements["camera-loading"].classList.add("hidden");
     const message = error?.name === "NotAllowedError"
       ? "请在浏览器设置中允许摄像头权限，然后重试。"
@@ -445,6 +459,7 @@ elements["close-pair"].addEventListener("click", closePairDialog);
 elements["pair-dialog"].addEventListener("close", stopPairScanner);
 elements["scan-mode"].addEventListener("click", () => setPairMode("scan"));
 elements["manual-mode"].addEventListener("click", () => setPairMode("manual"));
+elements["camera-retry"].addEventListener("click", () => startPairScanner());
 elements["show-settings"].addEventListener("click", () => elements["settings-dialog"].showModal());
 elements["close-settings"].addEventListener("click", () => elements["settings-dialog"].close());
 elements["cancel-connecting"].addEventListener("click", () => {
