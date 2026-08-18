@@ -44,6 +44,8 @@ test("container and release archives include browser assets", () => {
   assert.match(release, /cp -R web/);
   assert.doesNotMatch(browserApp, /hasCamera\(/);
   assert.match(browserApp, /权限请求超时/);
+  assert.match(browserApp, /parseBrowserPairValue/);
+  assert.match(browserApp, /enrollBrowserPair/);
   for (const file of [
     "web/app/index.html",
     "web/app/app.js",

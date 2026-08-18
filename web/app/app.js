@@ -16,6 +16,7 @@ const elements = Object.fromEntries(
 
 let authMode = "login";
 let pendingPair = parsePairValue(location.href);
+let pendingBrowserPair = parseBrowserPairValue(location.href);
 let signedInEmail = "";
 let connectionCancelled = false;
 let pairMode = "scan";
@@ -82,6 +83,24 @@ function validatePair(code, key, relay) {
   return { code: String(code), key };
 }
 
+function parseBrowserPairValue(value) {
+  try {
+    const url = new URL(String(value || "").trim(), location.href);
+    const query = url.hash.startsWith("#/web-pair?")
+      ? url.hash.slice("#/web-pair?".length)
+      : "";
+    const params = new URLSearchParams(query);
+    const deviceId = params.get("device");
+    const key = params.get("key");
+    if (!/^dev_[A-Za-z0-9_-]+$/.test(deviceId || "")) throw new Error("invalid device");
+    DshCrypto.fromBase64Url(key, 32);
+    if (url.origin !== location.origin) throw new Error("relay mismatch");
+    return { deviceId, key };
+  } catch {
+    return null;
+  }
+}
+
 async function claimPair(pair) {
   await DshKeyStore.set(`pending:${pair.code}`, pair.key);
   const result = await api("/pair/claim", { method: "POST", body: JSON.stringify({ code: pair.code }) });
@@ -92,6 +111,17 @@ async function claimPair(pair) {
   elements["pair-notice"].textContent = "电脑已绑定，现在可以建立端到端加密连接。";
   elements["pair-notice"].classList.remove("hidden");
   return result.deviceId;
+}
+
+async function enrollBrowserPair(pair) {
+  const data = await api("/devices");
+  const device = data.devices.find((item) => item.id === pair.deviceId);
+  if (!device) throw new Error("这台电脑不属于当前账号，请使用绑定它的账号登录。");
+  await DshKeyStore.set(pair.deviceId, pair.key);
+  history.replaceState(null, "", "/app/");
+  pendingBrowserPair = null;
+  elements["pair-notice"].textContent = `已为“${device.name}”启用浏览器访问。现在可以从网页端打开。`;
+  elements["pair-notice"].classList.remove("hidden");
 }
 
 function setAuthMode(mode) {
@@ -389,6 +419,18 @@ async function removeDevice(device) {
 
 async function enterDashboard() {
   showOnly("dashboard");
+  // Re-read the fragment after dependencies and authentication are ready.
+  // This also recovers from a cached page that initialized before the URL was
+  // updated by an external QR/link handoff.
+  pendingBrowserPair = pendingBrowserPair || parseBrowserPairValue(location.href);
+  if (pendingBrowserPair) {
+    try {
+      await enrollBrowserPair(pendingBrowserPair);
+    } catch (error) {
+      showNotice(error);
+      pendingBrowserPair = null;
+    }
+  }
   if (pendingPair) {
     try {
       const deviceId = await claimPair(pendingPair);
