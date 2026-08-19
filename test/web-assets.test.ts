@@ -52,6 +52,12 @@ test("container and release archives include browser assets", () => {
   assert.match(serviceWorker, /resumeTunnel/);
   assert.match(serviceWorker, /freshTicket/);
   assert.match(serviceWorker, /tunnel-sessions/);
+  assert.doesNotMatch(serviceWorker, /throw new DOMException/);
+  assert.match(serviceWorker, /pendingSends/);
+  assert.match(serviceWorker, /remoteDeviceFromUrl/);
+  assert.match(serviceWorker, /["GET", "HEAD"]/);
+  const keyStore = readFileSync("web/app/key-store.js", "utf8");
+  assert.match(keyStore, /indexedDB.open\("dsh-remote-web", 2\)/);
   const enrollmentStart = browserApp.indexOf(
     "async function enrollBrowserPair",
   );
@@ -66,8 +72,13 @@ test("container and release archives include browser assets", () => {
   assert.ok(clearFragment > 0 && clearFragment < authorizeDevice);
   assert.match(
     readFileSync("web/app/index.html", "utf8"),
-    /app\.js\?v=0\.1\.8/,
+    /app\.js\?v=0\.1\.9/,
   );
+  assert.match(
+    readFileSync("web/app/index.html", "utf8"),
+    /key-store\.js\?v=0\.1\.9/,
+  );
+  assert.match(browserApp, /sw\.js\?v=0\.1\.9/);
   for (const file of [
     "web/app/index.html",
     "web/app/app.js",

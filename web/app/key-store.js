@@ -2,8 +2,13 @@
   "use strict";
 
   const database = new Promise((resolve, reject) => {
-    const request = indexedDB.open("dsh-remote-web", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("device-keys");
+    const request = indexedDB.open("dsh-remote-web", 2);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains("device-keys"))
+        request.result.createObjectStore("device-keys");
+      if (!request.result.objectStoreNames.contains("tunnel-sessions"))
+        request.result.createObjectStore("tunnel-sessions", { keyPath: "deviceId" });
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });

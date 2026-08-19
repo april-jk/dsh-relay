@@ -5,12 +5,15 @@ importScripts("/app/crypto.js");
 
 const tunnels = new Map();
 const remoteClients = new Map();
+const reconnects = new Map();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const sessionDatabase = new Promise((resolve, reject) => {
   const request = indexedDB.open("dsh-remote-web", 2);
   request.onupgradeneeded = () => {
+    if (!request.result.objectStoreNames.contains("device-keys"))
+      request.result.createObjectStore("device-keys");
     if (!request.result.objectStoreNames.contains("tunnel-sessions"))
       request.result.createObjectStore("tunnel-sessions", { keyPath: "deviceId" });
   };
@@ -37,7 +40,7 @@ function writeSession(session) {
 
 function readMasterKey(deviceId) {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("dsh-remote-web", 1);
+    const request = indexedDB.open("dsh-remote-web", 2);
     request.onsuccess = () => {
       const transaction = request.result.transaction("device-keys", "readonly");
       const keyRequest = transaction.objectStore("device-keys").get(deviceId);
@@ -80,6 +83,7 @@ function remoteShim() {
       this.extensions = "";
       this.protocol = "";
       this.binaryType = "blob";
+      this.pendingSends = [];
       this.channel = `browser_ws_${Date.now()}_${nextChannel++}`;
       sockets.set(this.channel, this);
       navigator.serviceWorker.controller.postMessage({
@@ -91,7 +95,15 @@ function remoteShim() {
     }
 
     send(data) {
-      if (this.readyState !== DshWebSocket.OPEN) throw new DOMException("Socket is not open", "InvalidStateError");
+      if (this.readyState === DshWebSocket.CONNECTING) {
+        this.pendingSends.push(data);
+        return;
+      }
+      if (this.readyState !== DshWebSocket.OPEN) return;
+      this.transmit(data);
+    }
+
+    transmit(data) {
       if (typeof data === "string") {
         navigator.serviceWorker.controller.postMessage({ type: "remote-ws-send", channel: this.channel, text: data });
         return;
@@ -140,6 +152,7 @@ function remoteShim() {
       socket.readyState = DshWebSocket.OPEN;
       socket.protocol = message.protocol || "";
       socket.dispatchNamed("open", new Event("open"));
+      for (const data of socket.pendingSends.splice(0)) socket.transmit(data);
     } else if (message.event === "message") {
       let data = message.text;
       if (message.buffer) data = socket.binaryType === "arraybuffer" ? message.buffer : new Blob([message.buffer]);
@@ -226,6 +239,9 @@ class Tunnel {
   }
 
   fail(error) {
+    if (this.failed) return;
+    this.failed = true;
+    if (tunnels.get(this.deviceId) === this) tunnels.delete(this.deviceId);
     for (const pending of this.pendingHttp.values()) pending.reject(error);
     this.pendingHttp.clear();
     for (const entry of this.virtualSockets.values()) this.postSocket(entry.clientId, entry.channel, "close", { code: 1011, reason: "secure tunnel failed", wasClean: false });
@@ -414,6 +430,37 @@ async function resumeTunnel(deviceId) {
   }
 }
 
+function remoteDeviceFromUrl(value) {
+  try {
+    const match = /^\/remote\/([^/]+)/.exec(new URL(value).pathname);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function deviceForClient(clientId) {
+  if (!clientId) return null;
+  const known = remoteClients.get(clientId);
+  if (known) return known;
+  const client = await clients.get(clientId);
+  const deviceId = remoteDeviceFromUrl(client?.url);
+  if (deviceId) remoteClients.set(clientId, deviceId);
+  return deviceId;
+}
+
+async function reconnectTunnel(deviceId) {
+  if (!reconnects.has(deviceId)) {
+    reconnects.set(deviceId, (async () => {
+      const current = tunnels.get(deviceId);
+      tunnels.delete(deviceId);
+      current?.close(1012, "reconnecting");
+      return resumeTunnel(deviceId);
+    })().finally(() => reconnects.delete(deviceId)));
+  }
+  return reconnects.get(deviceId);
+}
+
 self.addEventListener("install", (event) => event.waitUntil(self.skipWaiting()));
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
@@ -441,18 +488,25 @@ self.addEventListener("message", (event) => {
     return;
   }
   const clientId = event.source?.id;
-  const deviceId = clientId ? remoteClients.get(clientId) : undefined;
-  const tunnel = deviceId ? tunnels.get(deviceId) : undefined;
-  if (!clientId || !tunnel) return;
-  if (message.type === "remote-ws-open") event.waitUntil(tunnel.openVirtualSocket(clientId, message));
-  if (message.type === "remote-ws-send") {
-    const data = message.text !== undefined ? encoder.encode(message.text) : new Uint8Array(message.buffer);
-    event.waitUntil(tunnel.sendInner("ws_frame", { dataB64: bytesToBase64(data), opcode: message.text !== undefined ? 1 : 2 }, message.channel));
-  }
-  if (message.type === "remote-ws-close") {
-    tunnel.virtualSockets.delete(message.channel);
-    event.waitUntil(tunnel.sendInner("ws_close", { code: message.code, reason: message.reason }, message.channel));
-  }
+  if (!clientId || typeof message.type !== "string" || !message.type.startsWith("remote-ws-")) return;
+  event.waitUntil((async () => {
+    const deviceId = await deviceForClient(clientId);
+    const tunnel = deviceId && (tunnels.get(deviceId) || await resumeTunnel(deviceId));
+    if (!tunnel) {
+      const client = await clients.get(clientId);
+      client?.postMessage({ type: "dsh-remote-ws", channel: message.channel, event: "close", code: 1013, reason: "secure tunnel unavailable", wasClean: false });
+      return;
+    }
+    if (message.type === "remote-ws-open") await tunnel.openVirtualSocket(clientId, message);
+    if (message.type === "remote-ws-send") {
+      const data = message.text !== undefined ? encoder.encode(message.text) : new Uint8Array(message.buffer);
+      await tunnel.sendInner("ws_frame", { dataB64: bytesToBase64(data), opcode: message.text !== undefined ? 1 : 2 }, message.channel);
+    }
+    if (message.type === "remote-ws-close") {
+      tunnel.virtualSockets.delete(message.channel);
+      await tunnel.sendInner("ws_close", { code: message.code, reason: message.reason }, message.channel);
+    }
+  })());
 });
 
 self.addEventListener("fetch", (event) => {
@@ -466,6 +520,8 @@ self.addEventListener("fetch", (event) => {
     const resultingId = event.resultingClientId || event.clientId;
     if (resultingId) remoteClients.set(resultingId, deviceId);
   }
+  deviceId ||= remoteDeviceFromUrl(event.request.referrer);
+  if (deviceId && event.clientId) remoteClients.set(event.clientId, deviceId);
   if (!deviceId) return;
   const path = launch ? `${launch[2] || "/"}${url.search}` : `${url.pathname}${url.search}`;
   event.respondWith((async () => {
@@ -475,6 +531,14 @@ self.addEventListener("fetch", (event) => {
       if (event.resultingClientId) remoteClients.delete(event.resultingClientId);
       return fetch("/remote/unavailable.html");
     }
-    return tunnel.request(path, event.request).catch(() => new Response("Secure tunnel failed", { status: 502 }));
+    try {
+      return await tunnel.request(path, event.request);
+    } catch {
+      if (!["GET", "HEAD"].includes(event.request.method))
+        return new Response("Secure tunnel failed", { status: 502 });
+      const recovered = await reconnectTunnel(deviceId);
+      if (!recovered) return new Response("Secure tunnel failed", { status: 502 });
+      return recovered.request(path, event.request).catch(() => new Response("Secure tunnel failed", { status: 502 }));
+    }
   })());
 });
