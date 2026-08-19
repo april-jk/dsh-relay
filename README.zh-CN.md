@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-> **非官方社区项目：** 本项目由社区独立开发和维护，未经 DeepSeek 审核、推荐或支持。
+> **DeepSeek Harness 插件基础设施：** 本 Relay 为 DSH Mobile 插件提供远程连接能力；该插件已向 DeepSeek Harness 官方插件仓库提交，并已发布到官方社区的插件展示区。
 
 用于 DSH 手机遥控 MVP 的云端 Relay。
 

@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-> **Community project:** this is an unofficial project, independently developed and maintained by the community. It is not reviewed, endorsed, or supported by DeepSeek.
+> **DeepSeek Harness plugin infrastructure:** this Relay supports the DSH Mobile plugin submitted to the official DeepSeek Harness plugin repository and published in the official community plugin showcase.
 
 Cloud Relay for the DSH mobile remote-control MVP.
 
