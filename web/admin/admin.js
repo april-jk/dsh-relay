@@ -3,6 +3,7 @@
 const byId = (id) => document.getElementById(id);
 const views = ["login-view", "disabled-view", "dashboard-view"];
 let lastStats = null;
+const { t } = DshI18n;
 
 function show(name) {
   for (const view of views) byId(view).classList.toggle("hidden", view !== name);
@@ -23,11 +24,11 @@ async function api(path, options = {}) {
 }
 
 function number(value) {
-  return new Intl.NumberFormat("zh-CN").format(value || 0);
+  return new Intl.NumberFormat(DshI18n.locale).format(value || 0);
 }
 
 function date(value) {
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return new Date(value).toLocaleString(DshI18n.locale, { hour12: false });
 }
 
 function setText(id, value) {
@@ -88,7 +89,7 @@ function renderSessions(sessions) {
   const body = byId("session-rows");
   body.replaceChildren();
   byId("sessions-empty").classList.toggle("hidden", sessions.length !== 0);
-  const labels = { active: "进行中", expired: "已过期", ended: "已结束" };
+  const labels = { active: t("active"), expired: t("expired"), ended: t("ended") };
   for (const session of sessions) {
     const row = document.createElement("tr");
     for (const value of [
@@ -112,16 +113,22 @@ function renderSessions(sessions) {
 
 async function loadStats() {
   const stats = await api("/admin/api/stats");
+  setText("stats-error", "");
+  delete byId("stats-error").dataset.i18n;
   lastStats = stats;
+  renderStats(stats);
+}
+
+function renderStats(stats) {
   setText("users-total", number(stats.users.total));
-  setText("users-new", `近 7 天新增 ${number(stats.users.new7d)}`);
+  setText("users-new", t("new7", { count: number(stats.users.new7d) }));
   setText("active-users", number(stats.sessions.activeUsers30d));
-  setText("users-24h", `近 24 小时新增 ${number(stats.users.new24h)}`);
+  setText("users-24h", t("new24", { count: number(stats.users.new24h) }));
   setText("devices-paired", number(stats.devices.paired));
-  setText("devices-online", `在线 ${number(stats.devices.online)}，DSH 可用 ${number(stats.devices.dshOnline)}`);
+  setText("devices-online", t("devicesOnline", { online: number(stats.devices.online), dsh: number(stats.devices.dshOnline) }));
   setText("sessions-active", number(stats.sessions.active));
-  setText("sessions-24h", `近 24 小时 ${number(stats.sessions.last24h)}`);
-  setText("updated-at", `更新于 ${date(stats.generatedAt)}`);
+  setText("sessions-24h", t("sessions24", { count: number(stats.sessions.last24h) }));
+  setText("updated-at", t("updated", { date: date(stats.generatedAt) }));
   renderChart(stats.daily);
   renderSessions(stats.recentSessions);
 }
@@ -129,6 +136,7 @@ async function loadStats() {
 byId("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   setText("login-error", "");
+  delete byId("login-error").dataset.i18n;
   try {
     await api("/admin/api/login", {
       method: "POST",
@@ -136,17 +144,22 @@ byId("login-form").addEventListener("submit", async (event) => {
     });
     show("dashboard-view");
     await loadStats();
-  } catch {
-    setText("login-error", "账号或密码不正确。");
+  } catch (error) {
+    const key = DshI18n.error(error);
+    DshI18n.text(byId("login-error"), key === "invalid_credentials" ? "adminCredentials" : key);
   }
 });
 
-byId("refresh").addEventListener("click", () => loadStats());
+byId("refresh").addEventListener("click", () => loadStats().catch((error) => DshI18n.text(byId("stats-error"), DshI18n.error(error))));
 byId("logout").addEventListener("click", async () => {
-  await api("/admin/api/logout", { method: "POST", body: "{}" });
-  show("login-view");
+  try {
+    await api("/admin/api/logout", { method: "POST", body: "{}" });
+    show("login-view");
+  } catch (error) { DshI18n.text(byId("stats-error"), DshI18n.error(error)); }
 });
 new ResizeObserver(() => { if (lastStats) renderChart(lastStats.daily); }).observe(byId("activity-chart"));
+
+window.addEventListener("dsh-language-change", () => { if (lastStats) renderStats(lastStats); });
 
 (async function start() {
   try {

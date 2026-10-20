@@ -1,16 +1,18 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>远程会话已结束</title>
+    <title data-i18n="sessionEnded">Remote session ended</title>
     <link rel="stylesheet" href="/app/app.css">
+    <script src="/app/i18n.js" defer></script>
   </head>
   <body>
+    <div class="language-picker"><label for="relay-language" data-i18n="language">Language</label> <select id="relay-language" data-language-picker><option value="en" lang="en">English</option><option value="pl" lang="pl">Polski</option><option value="zh-CN" lang="zh-CN">简体中文</option></select></div>
     <main class="state-view session-ended">
-      <h1>远程会话已结束</h1>
-      <p>浏览器可能回收了后台加密连接。返回设备列表即可重新连接。</p>
-      <a class="primary-button link-button" href="/app/">返回设备列表</a>
+      <h1 data-i18n="sessionEnded">Remote session ended</h1>
+      <p data-i18n="sessionEndedHelp">The browser may have suspended the background encrypted connection. Return to the device list to reconnect.</p>
+      <a class="primary-button link-button" href="/app/" data-i18n="backDevices">Back to devices</a>
     </main>
   </body>
 </html>

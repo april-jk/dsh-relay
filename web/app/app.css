@@ -179,3 +179,12 @@ dialog form { display: grid; padding: 22px; }
   * { scroll-behavior: auto !important; transition: none !important; }
   .spinner { animation-duration: 1.6s; }
 }
+
+.language-picker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; padding: 10px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); }
+.language-picker label { margin: 0; }
+.language-picker select { font: inherit; min-height: 44px; max-width: 100%; padding: 6px 12px; }
+.language-picker select:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+.device-menu-popover { width: max-content; max-width: min(240px, 80vw); }
+.device-menu-popover button { padding-block: 8px; overflow-wrap: anywhere; }
+.device-meta { flex-wrap: wrap; }

@@ -17,6 +17,7 @@ const publicFiles = new Map<string, string>([
   ["/app/", "app/index.html"],
   ["/app/app.css", "app/app.css"],
   ["/app/app.js", "app/app.js"],
+  ["/app/i18n.js", "app/i18n.js"],
   ["/app/crypto.js", "app/crypto.js"],
   ["/app/key-store.js", "app/key-store.js"],
   ["/app/qr-scanner.umd.min.js", "app/qr-scanner.umd.min.js"],

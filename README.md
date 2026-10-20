@@ -1,6 +1,6 @@
 # dsh-relay
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Polski](README.pl.md) | [简体中文](README.zh-CN.md)
 
 > **DeepSeek Harness plugin infrastructure:** this Relay supports the DSH Mobile plugin submitted to the official DeepSeek Harness plugin repository and published in the official community plugin showcase.
 
@@ -13,6 +13,12 @@ Public production endpoint: `https://relay.dshmobile.online`
 The Relay root redirects to `/app/`, a mobile-first web client for account access, pairing, device selection, and the original DSH Web UI. It implements `sealed-tunnel-v1` with Web Crypto. Device keys remain in the browser's IndexedDB and active Service Worker memory; the Relay still sees only routing metadata, ciphertext sizes, and timing.
 
 New Companion QR codes are HTTPS links shaped as `https://<relay>/app/#/pair?code=...&key=...`. iPhone Camera can open them directly, and URL fragments are not sent to the Relay. Production requires HTTPS and `PUBLIC_RELAY_URL=https://your-relay.example` with `ALLOW_LEGACY_WEB_PROXY=0`.
+
+### Interface language
+
+The Relay browser app, administration page, and session-unavailable page support English, Polish, and Simplified Chinese. The labeled language selector is available before sign-in and updates the current interface without reloading or clearing pairing fragments. Selection order is a supported saved `dsh-relay-language` preference, the first supported entry in `navigator.languages` (or `navigator.language`), then English. Language matching uses the `en`, `pl`, and `zh` families; unsupported locales fall back to English. If browser storage is unavailable, selection still works for the current page. Device names, remote DSH content, and server-provided release notes are not translated.
+
+Localization uses the external same-origin `/app/i18n.js` asset under the existing CSP. The Service Worker imports the same catalog for its own failure messages and retains a presentation locale with resumable tunnel metadata; locale never enters tunnel envelopes or authentication requests. Relay recovery assets bypass remote forwarding. No Cache API storage of credentials, keys, or decrypted remote content is added. Browser-generated validation/permission dialogs follow the browser or OS language. HTTPS, Service Worker, Web Crypto, WebSocket, camera permission, and browser background-lifetime limits still apply; changing language does not upgrade browser capabilities.
 
 ## Administration
 

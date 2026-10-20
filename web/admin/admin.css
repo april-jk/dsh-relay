@@ -117,3 +117,10 @@ button:focus-visible, input:focus-visible { outline: 3px solid color-mix(in srgb
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+.language-picker { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; padding: 10px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); }
+.language-picker label { margin: 0; }
+.language-picker select { font: inherit; min-height: 44px; max-width: 100%; padding: 6px 12px; }
+.language-picker select:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+.admin-bar, .admin-bar > div, .bar-actions { flex-wrap: wrap; }

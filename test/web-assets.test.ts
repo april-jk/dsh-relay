@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { isWebAsset, serveWeb } from "../src/web.js";
 
 test("browser E2EE reproduces the shared sealed-frame vector", () => {
   const script = `
@@ -43,7 +44,7 @@ test("container and release archives include browser assets", () => {
   assert.match(dockerfile, /COPY --from=build \/app\/web \.\/web/);
   assert.match(release, /cp -R web/);
   assert.doesNotMatch(browserApp, /hasCamera\(/);
-  assert.match(browserApp, /权限请求超时/);
+  assert.match(browserApp, /cameraTimeout/);
   assert.match(browserApp, /parseBrowserPairValue/);
   assert.match(browserApp, /enrollBrowserPair/);
   assert.match(browserApp, /parsePairInput/);
@@ -83,6 +84,7 @@ test("container and release archives include browser assets", () => {
     "web/app/index.html",
     "web/app/app.js",
     "web/app/sw.js",
+    "web/app/i18n.js",
     "web/app/qr-scanner.umd.min.js",
     "web/app/qr-scanner-worker.min.js",
     "web/app/qr-scanner.LICENSE",
@@ -91,4 +93,22 @@ test("container and release archives include browser assets", () => {
   ]) {
     assert.doesNotThrow(() => readFileSync(file));
   }
+});
+
+
+test("localization assets are allowed with the original strict CSP", () => {
+  for (const path of ["/app/i18n.js", "/app/", "/admin/", "/remote/unavailable.html", "/remote/dev_test/"]) {
+    assert.equal(isWebAsset(path), true);
+    let status = 0;
+    let headers: any;
+    let body: any;
+    const response: any = { writeHead: (code: number, value: any) => { status = code; headers = value; }, end: (value: any) => { body = value; } };
+    assert.equal(serveWeb({} as any, response, path), true);
+    assert.equal(status, path === "/remote/dev_test/" ? 503 : 200);
+    assert.match(headers["content-security-policy"], /script-src 'self'/);
+    assert.doesNotMatch(headers["content-security-policy"], /unsafe-inline|unsafe-eval/);
+    assert.ok(body.length);
+    if (path !== "/app/i18n.js") assert.match(body.toString(), /\/app\/i18n.js/);
+  }
+  assert.equal(isWebAsset("/app/arbitrary-file.js"), false);
 });

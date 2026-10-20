@@ -1,6 +1,6 @@
 # dsh-relay
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Polski](README.pl.md) | [简体中文](README.zh-CN.md)
 
 > **DeepSeek Harness 插件基础设施：** 本 Relay 为 DSH Mobile 插件提供远程连接能力；该插件已向 DeepSeek Harness 官方插件仓库提交，并已发布到官方社区的插件展示区。
 
@@ -15,6 +15,12 @@
 Companion 生成的二维码是 `https://<relay>/app/#/pair?code=...&key=...`。iPhone 相机可以直接打开；`#` 后的配对码与密钥不会发送到 Relay。已配对电脑还可以在 DSH 设置页生成浏览器访问码 `#/web-pair?device=...&key=...`，手机和多个浏览器可以分别保存同一台电脑的 E2EE 密钥并同时使用，不会互相解绑。旧版 JSON 二维码仍可由移动 App 解析，但新 Companion 默认生成浏览器链接。
 
 远程页面依赖 HTTPS、Service Worker、Web Crypto 与 WebSocket。生产部署必须设置 `PUBLIC_RELAY_URL=https://实际域名`，并保持 `ALLOW_LEGACY_WEB_PROXY=0`。
+
+### 界面语言
+
+Relay 浏览器客户端、管理后台及会话不可用页面支持英语、波兰语与简体中文。带标签的语言选择器在登录前即可使用，切换时无需刷新，也不会清除配对链接片段。语言优先顺序为：受支持的本地 `dsh-relay-language` 偏好、`navigator.languages`（或 `navigator.language`）中的首个受支持语言、英语。按 `en`、`pl`、`zh` 语言族匹配，不支持的语言回退为英语。浏览器禁止存储时仍可在当前页面切换。设备名称、远程 DSH 内容与服务器提供的更新说明不翻译。
+
+本地化使用同源外部 `/app/i18n.js` 脚本，保持现有 CSP。Service Worker 为自身错误消息导入同一词典，并在可恢复的隧道元数据中保存界面语言；语言不会进入隧道协议或鉴权请求。Relay 恢复页面资源不会被转发到远程 DSH。不新增凭证、密钥或远程解密内容的 Cache API 缓存。浏览器生成的表单验证、权限提示使用浏览器或操作系统语言。HTTPS、Service Worker、Web Crypto、WebSocket、摄像头权限及浏览器后台生命周期限制仍然适用；切换语言不会改变浏览器能力。
 
 ## 管理后台
 

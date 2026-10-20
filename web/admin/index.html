@@ -1,82 +1,85 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robots" content="noindex, nofollow">
-    <title>DSH Relay 管理</title>
+    <title data-i18n="adminTitle">DSH Relay administration</title>
     <link rel="stylesheet" href="/admin/admin.css">
+    <script src="/app/i18n.js" defer></script>
     <script src="/admin/admin.js" defer></script>
   </head>
   <body>
+    <div class="language-picker"><label for="relay-language" data-i18n="language">Language</label> <select id="relay-language" data-language-picker><option value="en" lang="en">English</option><option value="pl" lang="pl">Polski</option><option value="zh-CN" lang="zh-CN">简体中文</option></select></div>
     <header class="admin-bar">
       <div>
         <strong>DSH Relay</strong>
-        <span>运行统计</span>
+        <span data-i18n="statistics">Service statistics</span>
       </div>
       <div class="bar-actions">
         <span id="updated-at"></span>
-        <button id="refresh" class="quiet hidden" type="button">刷新</button>
-        <button id="logout" class="quiet hidden" type="button">退出</button>
+        <button id="refresh" class="quiet hidden" type="button" data-i18n="refresh">Refresh</button>
+        <button id="logout" class="quiet hidden" type="button" data-i18n="exit">Sign out</button>
       </div>
     </header>
 
     <main>
       <section id="login-view" class="login-view hidden">
         <form id="login-form">
-          <h1>后台登录</h1>
-          <p>使用 Relay 环境变量中配置的管理账号。</p>
-          <label for="username">账号</label>
+          <h1 data-i18n="adminLogin">Administrator sign-in</h1>
+          <p data-i18n="adminLoginHelp">Use the administrator account configured in the Relay environment variables.</p>
+          <label for="username" data-i18n="account">Account</label>
           <input id="username" name="username" autocomplete="username" required>
-          <label for="password">密码</label>
+          <label for="password" data-i18n="password">Password</label>
           <input id="password" name="password" type="password" autocomplete="current-password" required>
           <p id="login-error" class="error" role="alert"></p>
-          <button class="primary" type="submit">登录</button>
+          <button class="primary" type="submit" data-i18n="login">Sign in</button>
         </form>
       </section>
 
       <section id="disabled-view" class="message-view hidden">
-        <h1>后台尚未启用</h1>
-        <p>在 Relay 环境中设置 <code>ADMIN_USERNAME</code> 和 <code>ADMIN_PASSWORD</code>，然后重新部署。</p>
+        <h1 data-i18n="adminDisabled">Administration is not enabled</h1>
+        <p data-i18n="adminDisabledHelp">Set ADMIN_USERNAME and ADMIN_PASSWORD in the Relay environment, then redeploy.</p>
       </section>
 
       <section id="dashboard-view" class="hidden">
+        <p id="stats-error" class="error" role="alert"></p>
         <div class="heading">
-          <h1>使用概览</h1>
-          <p>统计仅包含账号、设备与访问会话元数据。</p>
+          <h1 data-i18n="overview">Usage overview</h1>
+          <p data-i18n="metadataOnly">Statistics include only account, device, and access-session metadata.</p>
         </div>
 
         <div class="metric-grid" id="metrics">
-          <article><span>用户总数</span><strong id="users-total">0</strong><small id="users-new">近 7 天 0</small></article>
-          <article><span>近 30 天活跃用户</span><strong id="active-users">0</strong><small id="users-24h">近 24 小时新增 0</small></article>
-          <article><span>已绑定电脑</span><strong id="devices-paired">0</strong><small id="devices-online">在线 0</small></article>
-          <article><span>当前访问会话</span><strong id="sessions-active">0</strong><small id="sessions-24h">近 24 小时 0</small></article>
+          <article><span data-i18n="totalUsers">Total users</span><strong id="users-total">0</strong><small id="users-new" data-i18n="new7Initial">Last 7 days: 0</small></article>
+          <article><span data-i18n="active30">Active users in the last 30 days</span><strong id="active-users">0</strong><small id="users-24h" data-i18n="new24Initial">New in the last 24 hours: 0</small></article>
+          <article><span data-i18n="pairedComputers">Paired computers</span><strong id="devices-paired">0</strong><small id="devices-online" data-i18n="onlineInitial">Online: 0</small></article>
+          <article><span data-i18n="currentSessions">Current access sessions</span><strong id="sessions-active">0</strong><small id="sessions-24h" data-i18n="last24Initial">Last 24 hours: 0</small></article>
         </div>
 
         <section class="chart-section">
           <div class="section-heading">
             <div>
-              <h2>最近 30 天</h2>
-              <p>新用户与远程访问会话</p>
+              <h2 data-i18n="last30">Last 30 days</h2>
+              <p data-i18n="chartDescription">New users and remote access sessions</p>
             </div>
-            <div class="legend"><span class="user-key">新用户</span><span class="session-key">会话</span></div>
+            <div class="legend"><span class="user-key" data-i18n="newUsers">New users</span><span class="session-key" data-i18n="sessions">Sessions</span></div>
           </div>
-          <canvas id="activity-chart" height="240" aria-label="最近 30 天新用户与会话折线图"></canvas>
+          <canvas id="activity-chart" height="240" aria-label="New users and sessions over the last 30 days" data-i18n-aria-label="chartLabel"></canvas>
         </section>
 
         <section class="sessions-section">
           <div class="section-heading">
             <div>
-              <h2>最近访问</h2>
-              <p>最多显示 50 条，不记录 DSH 内容。</p>
+              <h2 data-i18n="recentAccess">Recent access</h2>
+              <p data-i18n="recentHelp">Up to 50 entries; DSH content is not recorded.</p>
             </div>
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>用户</th><th>电脑</th><th>平台</th><th>开始时间</th><th>最后活动</th><th>状态</th></tr></thead>
+              <thead><tr><th data-i18n="user">User</th><th data-i18n="computer">Computer</th><th data-i18n="platform">Platform</th><th data-i18n="started">Started</th><th data-i18n="lastActivity">Last activity</th><th data-i18n="status">Status</th></tr></thead>
               <tbody id="session-rows"></tbody>
             </table>
-            <p id="sessions-empty" class="table-empty hidden">还没有远程访问记录。</p>
+            <p id="sessions-empty" class="table-empty hidden" data-i18n="noSessions">No remote access records yet.</p>
           </div>
         </section>
       </section>

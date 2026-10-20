@@ -1,7 +1,7 @@
-/* global DshCrypto */
+/* global DshCrypto, DshI18n */
 "use strict";
 
-importScripts("/app/crypto.js");
+importScripts("/app/crypto.js", "/app/i18n.js");
 
 const tunnels = new Map();
 const remoteClients = new Map();
@@ -174,6 +174,7 @@ const shimSource = `;(${remoteShim.toString()})();`;
 class Tunnel {
   constructor(options) {
     this.deviceId = options.deviceId;
+    this.locale = DshI18n.supported(options.locale) || "en";
     this.accessSessionId = options.accessSessionId;
     this.masterKey = options.masterKey;
     this.tunnelUrl = options.tunnelUrl;
@@ -190,7 +191,7 @@ class Tunnel {
       const encodedTicket = DshCrypto.base64Url(encoder.encode(this.ticket));
       const socket = new WebSocket(this.tunnelUrl, ["dsh-e2ee-v1", `dsh-ticket.${encodedTicket}`]);
       this.socket = socket;
-      const timer = setTimeout(() => reject(new Error("加密握手超时")), 10000);
+      const timer = setTimeout(() => reject(new Error("handshakeTimeout")), 10000);
       socket.addEventListener("open", async () => {
         try {
           const hello = await DshCrypto.clientHello(this.masterKey, this.accessSessionId);
@@ -225,9 +226,9 @@ class Tunnel {
       });
       socket.addEventListener("error", () => {
         clearTimeout(timer);
-        reject(new Error("无法连接加密隧道"));
+        reject(new Error("tunnelConnectFailed"));
       });
-      socket.addEventListener("close", () => this.fail(new Error("加密隧道已断开")));
+      socket.addEventListener("close", () => this.fail(new Error("tunnelDisconnected")));
     });
   }
 
@@ -408,6 +409,7 @@ async function resumeTunnel(deviceId) {
   const connect = async (ticketData) => {
     const options = {
       deviceId,
+      locale: session.locale,
       masterKey,
       ticket: ticketData.ticket,
       accessSessionId: ticketData.accessSessionId,
@@ -467,6 +469,15 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 self.addEventListener("message", (event) => {
   const message = event.data || {};
   const respond = (value) => event.ports[0]?.postMessage(value);
+  if (message.type === "set-presentation-locale") {
+    const locale = DshI18n.supported(message.locale) || "en";
+    event.waitUntil(Promise.all([...tunnels.values()].map(async (tunnel) => {
+      tunnel.locale = locale;
+      const session = await readSession(tunnel.deviceId);
+      if (session) await writeSession({ ...session, locale });
+    })));
+    return;
+  }
   if (message.type === "init-tunnel") {
     event.waitUntil((async () => {
       try {
@@ -476,13 +487,14 @@ self.addEventListener("message", (event) => {
         tunnels.set(message.deviceId, tunnel);
         await writeSession({
           deviceId: message.deviceId,
+          locale: tunnel.locale,
           ticket: message.ticket,
           accessSessionId: message.accessSessionId,
           tunnelUrl: message.tunnelUrl,
         });
         respond({ ok: true });
       } catch (error) {
-        respond({ ok: false, error: error instanceof Error ? error.message : "无法建立加密隧道" });
+        respond({ ok: false, error: error instanceof Error ? error.message : "tunnelFailed" });
       }
     })());
     return;
@@ -513,6 +525,10 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
   if (event.request.headers.get("x-dsh-sw-resume") === "1") return;
+  // These Relay-owned recovery assets must never be forwarded into DSH.
+  // There is deliberately no Cache API: credentials and decrypted responses
+  // retain the existing network-only behavior.
+  if (["/app/i18n.js", "/app/app.css", "/remote/unavailable.html"].includes(url.pathname)) return;
   const launch = /^\/remote\/([^/]+)(\/.*)?$/.exec(url.pathname);
   let deviceId = event.clientId ? remoteClients.get(event.clientId) : undefined;
   if (launch) {
@@ -531,14 +547,18 @@ self.addEventListener("fetch", (event) => {
       if (event.resultingClientId) remoteClients.delete(event.resultingClientId);
       return fetch("/remote/unavailable.html");
     }
+    const failed = (locale) => new Response(
+      DshI18n.t("secure_tunnel_failed", {}, locale),
+      { status: 502, headers: { "content-type": "text/plain; charset=utf-8", "content-language": locale, "cache-control": "no-store" } },
+    );
     try {
       return await tunnel.request(path, event.request);
     } catch {
       if (!["GET", "HEAD"].includes(event.request.method))
-        return new Response("Secure tunnel failed", { status: 502 });
+        return failed(tunnel.locale);
       const recovered = await reconnectTunnel(deviceId);
-      if (!recovered) return new Response("Secure tunnel failed", { status: 502 });
-      return recovered.request(path, event.request).catch(() => new Response("Secure tunnel failed", { status: 502 }));
+      if (!recovered) return failed(tunnel.locale);
+      return recovered.request(path, event.request).catch(() => failed(recovered.locale));
     }
   })());
 });

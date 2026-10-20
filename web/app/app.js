@@ -14,6 +14,9 @@ const elements = Object.fromEntries(
   ].map((id) => [id, document.getElementById(id)]),
 );
 
+const { t } = DshI18n;
+let deviceData = null;
+let connectingName = "";
 let authMode = "login";
 let pendingPair = parsePairValue(location.href);
 let pendingBrowserPair = parseBrowserPairValue(location.href);
@@ -33,16 +36,12 @@ function showOnly(id) {
   document.body.dataset.view = id;
 }
 
-function errorMessage(code) {
-  return {
-    invalid_credentials: "邮箱或密码不正确。",
-    email_exists: "这个邮箱已经注册，请直接登录。",
-    invalid_or_expired_code: "配对链接已使用或已过期，请在电脑上重新生成。",
-    device_offline: "电脑当前离线。",
-    dsh_offline: "电脑在线，但 DSH 尚未启动。",
-    e2ee_required: "这台电脑需要重新配对才能建立加密连接。",
-    rate_limited: "请求过于频繁，请稍后重试。",
-  }[code] || "操作没有完成，请重试。";
+function localizedText(node, key, values) {
+  DshI18n.text(node, key, values);
+}
+
+function showError(node, error, fallback) {
+  localizedText(node, DshI18n.error(error, fallback));
 }
 
 async function api(path, options = {}) {
@@ -53,7 +52,7 @@ async function api(path, options = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(errorMessage(data.error || data.reason));
+    const error = new Error(data.error || data.reason || "request_failed");
     error.code = data.error || data.reason;
     throw error;
   }
@@ -116,7 +115,7 @@ async function claimPair(pair) {
   await DshKeyStore.remove(`pending:${pair.code}`);
   history.replaceState(null, "", "/app/");
   pendingPair = null;
-  elements["pair-notice"].textContent = "电脑已绑定，现在可以建立端到端加密连接。";
+  localizedText(elements["pair-notice"], "paired");
   elements["pair-notice"].classList.remove("hidden");
   return result.deviceId;
 }
@@ -127,10 +126,10 @@ async function enrollBrowserPair(pair) {
   history.replaceState(null, "", "/app/");
   const data = await api("/devices");
   const device = data.devices.find((item) => item.id === pair.deviceId);
-  if (!device) throw new Error("这台电脑不属于当前账号，请使用绑定它的账号登录。");
+  if (!device) throw new Error("wrongAccount");
   await DshKeyStore.set(pair.deviceId, pair.key);
   pendingBrowserPair = null;
-  elements["pair-notice"].textContent = `已为“${device.name}”启用浏览器访问。现在可以从网页端打开。`;
+  localizedText(elements["pair-notice"], "browserEnabled", { name: device.name });
   elements["pair-notice"].classList.remove("hidden");
   return pair.deviceId;
 }
@@ -143,28 +142,27 @@ function setAuthMode(mode) {
   elements["login-mode"].setAttribute("aria-selected", String(login));
   elements["register-mode"].setAttribute("aria-selected", String(!login));
   elements.password.autocomplete = login ? "current-password" : "new-password";
-  elements["auth-submit"].textContent = login ? "登录" : "创建账号";
-  elements["auth-title"].textContent = login ? "连接你的 DSH" : "创建账号";
-  elements["auth-description"].textContent = login
-    ? "登录后访问已绑定电脑上的 DeepSeek Harness。"
-    : "注册后，用手机扫码绑定你的电脑。";
+  localizedText(elements["auth-submit"], login ? "login" : "createAccount");
+  localizedText(elements["auth-title"], login ? "connectTitle" : "createAccount");
+  localizedText(elements["auth-description"], login ? "loginDescription" : "registerDescription");
   elements["auth-error"].textContent = "";
+  delete elements["auth-error"].dataset.i18n;
 }
 
 function deviceStatus(device) {
-  if (!device.online) return { label: "电脑离线", className: "status-offline" };
-  if (device.dshStatus !== "online") return { label: "DSH 未启动", className: "status-warning" };
-  return { label: "在线", className: "status-online" };
+  if (!device.online) return { label: t("offlineStatus"), className: "status-offline" };
+  if (device.dshStatus !== "online") return { label: t("dshStopped"), className: "status-warning" };
+  return { label: t("online"), className: "status-online" };
 }
 
 function lastSeen(value) {
   if (!value) return "";
   const time = new Date(value);
   const elapsed = Math.max(0, Date.now() - time.getTime());
-  if (elapsed < 60_000) return "刚刚";
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
-  return `${time.getMonth() + 1} 月 ${time.getDate()} 日`;
+  if (elapsed < 60_000) return t("justNow");
+  if (elapsed < 3_600_000) return t("minutesAgo", { count: Math.floor(elapsed / 60_000) });
+  if (elapsed < 86_400_000) return t("hoursAgo", { count: Math.floor(elapsed / 3_600_000) });
+  return new Intl.DateTimeFormat(DshI18n.locale, { month: "short", day: "numeric" }).format(time);
 }
 
 function closeDeviceMenus(except) {
@@ -174,7 +172,7 @@ function closeDeviceMenus(except) {
 }
 
 async function renameDevice(device) {
-  const name = prompt("电脑名称", device.name)?.trim();
+  const name = prompt(t("computerName"), device.name)?.trim();
   if (!name || name === device.name) return;
   await api(`/devices/${encodeURIComponent(device.id)}`, {
     method: "PATCH",
@@ -185,6 +183,7 @@ async function renameDevice(device) {
 
 async function renderDevices(data) {
   data ||= await api("/devices");
+  deviceData = data;
   elements["device-list"].replaceChildren();
   elements["empty-devices"].classList.toggle("hidden", data.devices.length !== 0);
   for (const device of data.devices) {
@@ -196,7 +195,7 @@ async function renderDevices(data) {
     open.className = "device-open";
     open.type = "button";
     open.disabled = !device.online || device.dshStatus !== "online";
-    open.setAttribute("aria-label", `打开 ${device.name}`);
+    open.setAttribute("aria-label", t("openDevice", { name: device.name }));
 
     const icon = document.createElement("span");
     icon.className = "device-icon";
@@ -230,18 +229,18 @@ async function renderDevices(data) {
     menuButton.className = "icon-button";
     menuButton.type = "button";
     menuButton.textContent = "⋮";
-    menuButton.setAttribute("aria-label", `${device.name} 操作`);
+    menuButton.setAttribute("aria-label", t("deviceMenu", { name: device.name }));
     menuButton.setAttribute("aria-expanded", "false");
     const popover = document.createElement("div");
     popover.className = "device-menu-popover hidden";
     const rename = document.createElement("button");
     rename.type = "button";
-    rename.textContent = "重命名";
+    rename.textContent = t("rename");
     rename.addEventListener("click", () => renameDevice(device).catch(showNotice));
     const remove = document.createElement("button");
     remove.className = "remove-action";
     remove.type = "button";
-    remove.textContent = "移除配对";
+    remove.textContent = t("removePair");
     remove.addEventListener("click", () => removeDevice(device).catch(showNotice));
     popover.append(rename, remove);
     menuButton.addEventListener("click", () => {
@@ -257,12 +256,12 @@ async function renderDevices(data) {
 }
 
 function showNotice(error) {
-  elements["pair-notice"].textContent = error.message || String(error);
+  showError(elements["pair-notice"], error);
   elements["pair-notice"].classList.remove("hidden");
 }
 
 function setCameraStatus(message, error = false) {
-  elements["camera-status"].textContent = message;
+  localizedText(elements["camera-status"], message);
   elements["camera-status"].classList.toggle("error", error);
   elements["camera-retry"].classList.toggle("hidden", !error);
 }
@@ -275,15 +274,15 @@ function stopPairScanner() {
 async function startPairScanner() {
   if (pairMode !== "scan" || !elements["pair-dialog"].open) return;
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-    setCameraStatus("请使用 HTTPS 访问，当前浏览器无法打开摄像头。", true);
+    setCameraStatus("cameraHttps", true);
     return;
   }
   if (!window.QrScanner) {
-    setCameraStatus("扫码组件尚未加载，请刷新页面后重试。", true);
+    setCameraStatus("scannerMissing", true);
     return;
   }
   elements["camera-loading"].classList.remove("hidden");
-  setCameraStatus("正在请求摄像头权限…");
+  setCameraStatus("cameraRequest");
   try {
     if (!pairScanner) {
       QrScanner.WORKER_PATH = "/app/qr-scanner-worker.min.js";
@@ -302,20 +301,20 @@ async function startPairScanner() {
       await Promise.race([
         pairScanner.start(),
         new Promise((_, reject) => {
-          timeoutId = setTimeout(() => reject(new Error("摄像头权限请求超时，请重试或输入配对链接。")), 12_000);
+          timeoutId = setTimeout(() => reject(new Error("cameraTimeout")), 12_000);
         }),
       ]);
     } finally {
       clearTimeout(timeoutId);
     }
     elements["camera-loading"].classList.add("hidden");
-    setCameraStatus("将电脑终端中的二维码放入框内。摄像头内容只在本机处理。");
+    setCameraStatus("cameraHelp");
   } catch (error) {
     stopPairScanner();
     elements["camera-loading"].classList.add("hidden");
     const message = error?.name === "NotAllowedError"
-      ? "请在浏览器设置中允许摄像头权限，然后重试。"
-      : error?.message || "无法打开摄像头，请改用输入链接。";
+      ? "cameraDenied"
+      : DshI18n.error(error, "cameraFailed");
     setCameraStatus(message, true);
   }
 }
@@ -338,9 +337,10 @@ function setPairMode(mode) {
 
 async function submitPairValue(raw) {
   const parsed = parsePairInput(raw);
-  if (!parsed) throw new Error("二维码不是有效的 DSH 加密配对码或浏览器访问码。");
+  if (!parsed) throw new Error("invalidPair");
   pairSubmitting = true;
   elements["pair-error"].textContent = "";
+  delete elements["pair-error"].dataset.i18n;
   stopPairScanner();
   try {
     const deviceId = parsed.kind === "browser"
@@ -359,8 +359,8 @@ function handleScannedPair(raw) {
   if (pairSubmitting || !raw) return;
   submitPairValue(raw).catch((error) => {
     pairSubmitting = false;
-    elements["pair-error"].textContent = error.message;
-    setCameraStatus("没有识别到有效的 DSH 配对二维码，请重新对准。", true);
+    showError(elements["pair-error"], error);
+    setCameraStatus("scanInvalid", true);
     if (elements["pair-dialog"].open) startPairScanner();
   });
 }
@@ -375,12 +375,12 @@ async function waitForDevice(deviceId) {
 }
 
 async function ensureWorker() {
-  if (!("serviceWorker" in navigator) || !crypto.subtle) throw new Error("当前浏览器不支持安全远程访问，请升级 Safari。");
+  if (!("serviceWorker" in navigator) || !crypto.subtle) throw new Error("unsupportedBrowser");
   await navigator.serviceWorker.register("/app/sw.js?v=0.1.9", { scope: "/" });
   await navigator.serviceWorker.ready;
   if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("安全连接组件启动超时。")), 5000);
+    const timer = setTimeout(() => reject(new Error("workerTimeout")), 5000);
     navigator.serviceWorker.addEventListener("controllerchange", () => {
       clearTimeout(timer);
       resolve(navigator.serviceWorker.controller);
@@ -391,10 +391,10 @@ async function ensureWorker() {
 function initializeTunnel(worker, options) {
   return new Promise((resolve, reject) => {
     const channel = new MessageChannel();
-    const timer = setTimeout(() => reject(new Error("加密连接启动超时。")), 15000);
+    const timer = setTimeout(() => reject(new Error("connectTimeout")), 15000);
     channel.port1.onmessage = (event) => {
       clearTimeout(timer);
-      event.data?.ok ? resolve() : reject(new Error(event.data?.error || "无法建立加密连接。"));
+      event.data?.ok ? resolve() : reject(new Error(event.data?.error || "connectFailed"));
     };
     worker.postMessage({ type: "init-tunnel", ...options }, [channel.port2]);
   });
@@ -402,11 +402,12 @@ function initializeTunnel(worker, options) {
 
 async function openRemote(device) {
   connectionCancelled = false;
-  elements["connecting-device"].textContent = `正在安全连接 ${device.name}。`;
+  connectingName = device.name;
+  localizedText(elements["connecting-device"], "connectingDevice", { name: device.name });
   showOnly("connecting");
   try {
     const masterKey = await DshKeyStore.get(device.id);
-    if (!masterKey) throw new Error("此浏览器没有这台电脑的加密密钥，请重新配对。");
+    if (!masterKey) throw new Error("missingKey");
     const ticket = await api("/web-ticket", { method: "POST", body: JSON.stringify({ deviceId: device.id }) });
     const worker = await ensureWorker();
     await initializeTunnel(worker, {
@@ -415,6 +416,7 @@ async function openRemote(device) {
       tunnelUrl: ticket.tunnelUrl,
       ticket: ticket.ticket,
       masterKey,
+      locale: DshI18n.locale,
     });
     if (!connectionCancelled) location.assign(`/remote/${encodeURIComponent(device.id)}/`);
   } catch (error) {
@@ -425,7 +427,7 @@ async function openRemote(device) {
 
 async function removeDevice(device) {
   closeDeviceMenus();
-  if (!confirm(`确定移除“${device.name}”吗？移除后需要回到电脑前重新扫码。`)) return;
+  if (!confirm(t("removeConfirm", { name: device.name }))) return;
   await api(`/devices/${encodeURIComponent(device.id)}`, { method: "DELETE", body: "{}" });
   await DshKeyStore.remove(device.id);
   await renderDevices();
@@ -458,16 +460,16 @@ async function enterDashboard() {
 
 function updateAccountDetails(email) {
   signedInEmail = email || signedInEmail;
-  elements["settings-email"].textContent = signedInEmail || "已登录";
+  elements["settings-email"].textContent = signedInEmail || t("signedIn");
   elements["settings-relay"].textContent = location.origin;
 }
 
 elements["auth-form"].addEventListener("submit", async (event) => {
   event.preventDefault();
   elements["auth-error"].textContent = "";
+  delete elements["auth-error"].dataset.i18n;
   elements["auth-submit"].disabled = true;
-  const label = elements["auth-submit"].textContent;
-  elements["auth-submit"].textContent = authMode === "login" ? "正在登录…" : "正在创建…";
+  localizedText(elements["auth-submit"], authMode === "login" ? "loggingIn" : "creating");
   try {
     await api(`/web-auth/${authMode}`, {
       method: "POST",
@@ -476,10 +478,10 @@ elements["auth-form"].addEventListener("submit", async (event) => {
     updateAccountDetails(elements.email.value.trim().toLowerCase());
     await enterDashboard();
   } catch (error) {
-    elements["auth-error"].textContent = error.message;
+    showError(elements["auth-error"], error);
   } finally {
     elements["auth-submit"].disabled = false;
-    elements["auth-submit"].textContent = label;
+    localizedText(elements["auth-submit"], authMode === "login" ? "login" : "createAccount");
   }
 });
 
@@ -488,11 +490,15 @@ elements["register-mode"].addEventListener("click", () => setAuthMode("register"
 elements["toggle-password"].addEventListener("click", () => {
   const revealing = elements.password.type === "password";
   elements.password.type = revealing ? "text" : "password";
-  elements["toggle-password"].setAttribute("aria-label", revealing ? "隐藏密码" : "显示密码");
-  elements["toggle-password"].title = revealing ? "隐藏密码" : "显示密码";
+  const key = revealing ? "hidePassword" : "showPassword";
+  elements["toggle-password"].dataset.i18nAriaLabel = key;
+  elements["toggle-password"].dataset.i18nTitle = key;
+  DshI18n.apply();
 });
 elements.logout.addEventListener("click", async () => {
-  await api("/web-auth/logout", { method: "POST", body: "{}" });
+  try {
+    await api("/web-auth/logout", { method: "POST", body: "{}" });
+  } catch (error) { showNotice(error); return; }
   elements["settings-dialog"].close();
   elements.password.value = "";
   signedInEmail = "";
@@ -500,6 +506,7 @@ elements.logout.addEventListener("click", async () => {
 });
 function openPairDialog() {
   elements["pair-error"].textContent = "";
+  delete elements["pair-error"].dataset.i18n;
   elements["pair-dialog"].showModal();
   setPairMode("scan");
 }
@@ -529,11 +536,21 @@ elements["pair-form"].addEventListener("submit", async (event) => {
   event.preventDefault();
   if (pairMode !== "manual" || pairSubmitting) return;
   elements["pair-error"].textContent = "";
+  delete elements["pair-error"].dataset.i18n;
   try {
     await submitPairValue(elements["pair-link"].value);
   } catch (error) {
-    elements["pair-error"].textContent = error.message;
+    showError(elements["pair-error"], error);
   }
+});
+
+window.addEventListener("dsh-language-change", () => {
+  if (!elements["auth-submit"].disabled) {
+    localizedText(elements["auth-submit"], authMode === "login" ? "login" : "createAccount");
+  }
+  updateAccountDetails();
+  if (deviceData) renderDevices(deviceData);
+  if (connectingName) localizedText(elements["connecting-device"], "connectingDevice", { name: connectingName });
 });
 
 (async function start() {
